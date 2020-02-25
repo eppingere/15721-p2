@@ -1,6 +1,9 @@
 #pragma once
 
+#include <common/shared_latch.h>
+
 #include <functional>
+
 #include "common/macros.h"
 
 namespace terrier::storage::index {
@@ -9,28 +12,35 @@ template <typename KeyType, typename ValueType, typename KeyComparator = std::le
     typename KeyEqualityChecker = std::equal_to<KeyType>, typename KeyHashFunc = std::hash<KeyType>,
     typename ValueEqualityChecker = std::equal_to<ValueType>>
 class BPlusTree {
-  class InnerNode;
-  class Leaf;
-  enum class NodeType: bool;
 
-  class GeneralNode;
+  static std::atomic<uint64_t> epoch;
+  static const short branch_factor_ = 8;
+  static const short leaf_size_ = 8;
+  static const uint64_t write_lock_mask_ = static_cast<uint64_t>(0x01) << 63;
+  static const uint64_t node_type_mask_ = static_cast<uint64_t>(0x01) << 62;
+  static const uint64_t is_deleted_mask_ = static_cast<uint64_t>(0x01) << 61;
+  static const uint64_t delete_epoch_mask_ = ~(static_cast<uint64_t>(0xE) << 60) & (~static_cast<uint64_t>(0xF));
+  static const uint64_t size_mask_ = static_cast<uint64_t>(0xF);
+  static const uint64_t size_length_ = static_cast<uint64_t>(8);
 
   enum class NodeType: bool {
     LEAF = true,
     INNER_NODE = false,
   };
 
-  class GeneralNode {
+  class Info {
    public:
-    GeneralNode(NodeType t);
-    ~GeneralNode();
+    Info(BPlusTree::NodeType t) : info_(t == NodeType::LEAF ? node_type_mask_ : 0) {}
+    ~Info()=default;
+
+    std::atomic<uint64_t> info_;
 
     inline void write_lock() {
       while(true) {
-        uint64_t old_value = meta_data_.load();
+        uint64_t old_value = info_.load();
         uint64_t not_locked = old_value | (~write_lock_mask_);
         uint64_t locked = old_value | write_lock_mask_;
-        if (meta_data_.compare_exchange_strong(not_locked, locked)) {
+        if (info_.compare_exchange_strong(not_locked, locked)) {
           continue;
         }
         break;
@@ -38,60 +48,58 @@ class BPlusTree {
     };
 
     inline void write_unlock() {
-      TERRIER_ASSERT(meta_data_.load() & write_lock_mask_, "unlock called on unlocked inner node");
-      meta_data_ = meta_data_.load() | (~write_lock_mask_);
+      TERRIER_ASSERT(info_.load() & write_lock_mask_, "unlock called on unlocked inner node");
+      while (true) {
+        uint64_t old_meta_data = info_.load();
+        if (info_.compare_exchange_strong(old_meta_data, old_meta_data | (~write_lock_mask_))) {
+          continue;
+        }
+        break;
+      }
     };
 
     inline void mark_delete() {
-      TERRIER_ASSERT(meta_data_.load() & is_deleted_mask_,
+      TERRIER_ASSERT(!(info_.load() & is_deleted_mask_),
                      "tried to mark as deleted already deleted node");
-      meta_data_ = meta_data_.load() | (~is_deleted_mask_);
+      while (true) {
+        uint64_t old_meta_data = info_.load();
+        uint64_t e = epoch.load() & delete_epoch_mask_;
+        if (info_.compare_exchange_strong(old_meta_data, old_meta_data | (~is_deleted_mask_) | e)) {
+          continue;
+        }
+        break;
+      }
     }
 
-    inline NodeType get_type() { return static_cast<NodeType>(meta_data_ & node_type_mask_); }
+    inline uint64_t get_delete_epoch() {
+      TERRIER_ASSERT(info_.load() & is_deleted_mask_, "got delete epoch of non deleted node");
+      return (info_.load() & delete_epoch_mask_) >> size_length_;
+    }
 
-   private:
-    std::atomic<uint64_t> meta_data_;
-    char* node_;
+    inline NodeType get_type() { return static_cast<NodeType>(info_ & node_type_mask_); }
+
+    inline NodeType get_size() { return info_ & size_mask_; }
   };
 
   class InnerNode {
    public:
-    InnerNode();
-    ~InnerNode();
+    InnerNode() : info_({NodeType::INNER_NODE}) {}
+    ~InnerNode()=default;
 
-
-   private:
-    friend class BPlusTree;
-
+    Info info_;
+    std::atomic<InnerNode *> children_[branch_factor_];
+    KeyType keys_[branch_factor_ - 1];
   };
 
   class Leaf {
    public:
-    Leaf();
-    ~Leaf();
+    Leaf() : info_({NodeType::LEAF}) {};
+    ~Leaf()=default;
 
-   private:
-    friend class BPlusTree;
-
+    Info info_;
+    std::atomic<Leaf*> right, left;
+    std::pair<KeyType, ValueType> kvs_[leaf_size_];
   };
-
- public:
-  BPlusTree();
-  ~BPlusTree();
-
- protected:
-  // ideally running with 64 byte cache line
-  std::atomic<uint64_t> epoch = 0;
-  const short cache_line_size_ = 64;
-  const short leaf_node_size_ = cache_line_size_;
-  const short inner_node_size_ = cache_line_size_;
-  static const uint64_t write_lock_mask_ = static_cast<uint64_t>(0x01) << 63;
-  static const uint64_t node_type_mask_ = static_cast<uint64_t>(0x01) << 62;
-  static const uint64_t is_deleted_mask_ = static_cast<uint64_t>(0x01) << 61;
-
-
-
 
 };
 
