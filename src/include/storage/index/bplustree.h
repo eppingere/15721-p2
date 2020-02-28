@@ -28,12 +28,13 @@ class BPlusTree {
     INNER_NODE = false,
   };
 
-  class Info {
+  class BaseNode {
    public:
-    Info(BPlusTree::NodeType t) : info_(t == NodeType::LEAF ? node_type_mask_ : 0) {}
-    ~Info()=default;
+    BaseNode(BPlusTree::NodeType t) : info_(t == NodeType::LEAF ? node_type_mask_ : 0) {}
+    ~BaseNode()=default;
 
     std::atomic<uint64_t> info_;
+    common::SharedLatch base_latch_;
 
     inline void write_lock() {
       while(true) {
@@ -81,24 +82,23 @@ class BPlusTree {
     inline NodeType get_size() { return info_ & size_mask_; }
   };
 
-  class InnerNode {
+  class InnerNode : BaseNode {
    public:
-    InnerNode() : info_({NodeType::INNER_NODE}) {}
+    InnerNode() : BaseNode{NodeType::INNER_NODE} {},
     ~InnerNode()=default;
 
-    Info info_;
     std::atomic<InnerNode *> children_[branch_factor_];
     KeyType keys_[branch_factor_ - 1];
   };
 
-  class Leaf {
+  class LeafNode : BaseNode {
    public:
-    Leaf() : info_({NodeType::LEAF}) {};
-    ~Leaf()=default;
+    LeafNode() : BaseNode{NodeType::LEAF} {};
+    ~LeafNode()=default;
 
-    Info info_;
-    std::atomic<Leaf*> right, left;
-    std::pair<KeyType, ValueType> kvs_[leaf_size_];
+    std::atomic<LeafNode*> left, right;
+    KeyType keys_[leaf_size_];
+    ValueType values_[leaf_size_];
   };
 
 };
