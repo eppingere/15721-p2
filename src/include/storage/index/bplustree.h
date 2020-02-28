@@ -13,6 +13,7 @@ template <typename KeyType, typename ValueType, typename KeyComparator = std::le
     typename ValueEqualityChecker = std::equal_to<ValueType>>
 class BPlusTree {
 
+
   static std::atomic<uint64_t> epoch;
   static const short branch_factor_ = 8;
   static const short leaf_size_ = 8;
@@ -22,6 +23,8 @@ class BPlusTree {
   static const uint64_t delete_epoch_mask_ = ~(static_cast<uint64_t>(0xE) << 60) & (~static_cast<uint64_t>(0xF));
   static const uint64_t size_mask_ = static_cast<uint64_t>(0xF);
   static const uint64_t size_length_ = static_cast<uint64_t>(8);
+
+
 
   enum class NodeType: bool {
     LEAF = true,
@@ -100,6 +103,11 @@ class BPlusTree {
     KeyType keys_[leaf_size_];
     ValueType values_[leaf_size_];
   };
+
+  BaseNode* root_;
+  std::atomic<uint64_t> size_;
+
+  BPlusTree() : root_{new LeafNode()}, size_{sizeof(LeafNode)} {};
 
 };
 
