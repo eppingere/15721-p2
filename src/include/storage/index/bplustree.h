@@ -3,6 +3,7 @@
 #include <common/shared_latch.h>
 
 #include <functional>
+#include <storage/storage_defs.h>
 
 #include "common/macros.h"
 
@@ -12,7 +13,11 @@ template <typename KeyType, typename ValueType, typename KeyComparator = std::le
     typename KeyEqualityChecker = std::equal_to<KeyType>, typename KeyHashFunc = std::hash<KeyType>,
     typename ValueEqualityChecker = std::equal_to<ValueType>>
 class BPlusTree {
-
+ public:
+  BPlusTree(KeyComparator p_key_cmp_obj = KeyComparator{},
+      KeyEqualityChecker p_key_eq_obj = KeyEqualityChecker{}, KeyHashFunc p_key_hash_obj = KeyHashFunc{},
+      ValueEqualityChecker p_value_eq_obj = ValueEqualityChecker{})
+  : root_{static_cast<BaseNode *>(new LeafNode)}, size_{sizeof(LeafNode)} {};
 
   static std::atomic<uint64_t> epoch;
   static const short branch_factor_ = 8;
@@ -85,18 +90,18 @@ class BPlusTree {
     inline NodeType get_size() { return info_ & size_mask_; }
   };
 
-  class InnerNode : BaseNode {
+  class InnerNode : public BaseNode {
    public:
-    InnerNode() : BaseNode{NodeType::INNER_NODE} {},
+    InnerNode() : BaseNode(NodeType::INNER_NODE) {};
     ~InnerNode()=default;
 
     std::atomic<InnerNode *> children_[branch_factor_];
     KeyType keys_[branch_factor_ - 1];
   };
 
-  class LeafNode : BaseNode {
+  class LeafNode : public BaseNode {
    public:
-    LeafNode() : BaseNode{NodeType::LEAF} {};
+    LeafNode() : BaseNode(NodeType::LEAF) {};
     ~LeafNode()=default;
 
     std::atomic<LeafNode*> left, right;
@@ -104,11 +109,14 @@ class BPlusTree {
     ValueType values_[leaf_size_];
   };
 
-  BaseNode* root_;
+  BaseNode *root_;
   std::atomic<uint64_t> size_;
 
-  BPlusTree() : root_{new LeafNode()}, size_{sizeof(LeafNode)} {};
-
+  // TODO: Check if bool or bool (*) is correct type of predicate
+  bool InsertIf(std::function<bool (const ValueType)> predicate, KeyType key, ValueType value);
+  LeafNode* FindMin(KeyType key);
+  LeafNode* FindMax(KeyType key);
+  void FindRange(KeyType min_key, KeyType max_key, bool is_increasing, std::vector <TupleSlot> *results);
 };
 
 }  // namespace terrier::storage::index
