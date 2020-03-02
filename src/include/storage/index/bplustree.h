@@ -134,38 +134,38 @@ class BPlusTree {
     LeafNode() : BaseNode(NodeType::LEAF), left_(nullptr), right_(nullptr) {};
     ~LeafNode()=default;
 
-    inline bool take_toumb_stone_slot(uint16_t i) {
-      if (UNLIKELY(i >= toumb_stones_length_)) return false;
+    inline bool take_tomb_stone_slot(uint16_t i) {
+      if (UNLIKELY(i >= tomb_stones_length_)) return false;
       uint64_t index = i / delete_mask_size_;
       uint64_t mask = static_cast<uint64_t>(0x1) << (i % delete_mask_size_);
-      uint64_t old_val = toumb_stones_[index].load();
+      uint64_t old_val = tomb_stones_[index].load();
       return static_cast<bool>(old_val & mask) &&
-             toumb_stones_[index].compare_exchange_strong(old_val, old_val & (~mask));
+             tomb_stones_[index].compare_exchange_strong(old_val, old_val & (~mask));
     }
 
-    inline void mark_toumb_stone(uint16_t i) {
-      if (UNLIKELY(i >= toumb_stones_length_)) return;
+    inline void mark_tomb_stone(uint16_t i) {
+      if (UNLIKELY(i >= tomb_stones_length_)) return;
       uint64_t index = i / delete_mask_size_;
       uint64_t mask = static_cast<uint64_t>(0x1) << (i % delete_mask_size_);
       while (true) {
-        uint64_t old_val = toumb_stones_[index].load();
-        if (!toumb_stones_[index].compare_exchange_strong(old_val, old_val | mask)) continue;
+        uint64_t old_val = tomb_stones_[index].load();
+        if (!tomb_stones_[index].compare_exchange_strong(old_val, old_val | mask)) continue;
         break;
       }
     }
 
     inline bool is_occupied(uint16_t i) {
-      if (UNLIKELY(i >= toumb_stones_length_)) return false;
+      if (UNLIKELY(i >= tomb_stones_length_)) return false;
       uint64_t index = i / delete_mask_size_;
       uint64_t mask = static_cast<uint64_t>(0x1) << (i % delete_mask_size_);
-      uint64_t val = toumb_stones_[index].load();
+      uint64_t val = tomb_stones_[index].load();
       return !static_cast<bool>(val & mask);
     }
 
     bool insert(KeyType key, ValueType value) {
       // look for deleted slot
       for (uint16_t i = 0; i < this->size_; i++) {
-        if (take_toumb_stone_slot(i)) {
+        if (take_tomb_stone_slot(i)) {
           keys_[i] = key;
           values_[i] = value;
           return true;
@@ -195,7 +195,7 @@ class BPlusTree {
     bool mark_delete(KeyType key, ValueType value) {
       for (uint16_t i = 0; i < size_.load(); i++)
         if (is_occupied(i) && KeyCmpEqual(key, keys_[i]) && ValueCmpEqual(value, values_[i])) {
-          mark_toumb_stone(i);
+          mark_tomb_stone(i);
           return true;
         }
       return false;
@@ -212,8 +212,8 @@ class BPlusTree {
       return res;
     }
 
-    static const uint64_t toumb_stones_length_ = (leaf_size_ + (delete_mask_size_ - 1)) / delete_mask_size_;
-    std::atomic<uint64_t> toumb_stones_[toumb_stones_length_];
+    static const uint64_t tomb_stones_length_ = (leaf_size_ + (delete_mask_size_ - 1)) / delete_mask_size_;
+    std::atomic<uint64_t> tomb_stones_[tomb_stones_length_];
     std::atomic<LeafNode*> left_, right_;
     KeyType keys_[leaf_size_];
     ValueType values_[leaf_size_];
