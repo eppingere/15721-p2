@@ -98,18 +98,28 @@ class BPlusTree {
 
 
     BaseNode* findMinChild(KeyType key) {
-      uint16_t i;
-      for (i = 0; i < this->size_.load(); i++)
-        if (KeyCmpLessEqual(key, keys_[i]))
-          return children_[i];
+      if (this->size_.load() == 0) {
+        return NULL;
+      } else {
+        uint16_t i;
+        for (i = 0; i < this->size_.load(); i++)
+          if (KeyCmpLessEqual(key, keys_[i]))
+            return children_[i];
 
-      return children_[i];
+        return children_[i-1];
+      }
     }
 
     BaseNode* findMaxChild(KeyType key) {
-      uint16_t i;
-      for (i = 0; i < this->size_.load(); i++) {
-        
+      if (this->size_.load() == 0) {
+        return NULL;
+      } else {
+        uint16_t i;
+        for (i = this->size_.load() - 1; i >= 0; i--)
+          if (KeyCmpGreaterEqual(key, keys_[i]))
+            return children_[i];
+
+        return children_[i];
       }
     }
 
