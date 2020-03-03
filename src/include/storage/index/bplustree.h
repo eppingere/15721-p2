@@ -18,11 +18,11 @@ class BPlusTree {
   BPlusTree(KeyComparator p_key_cmp_obj = KeyComparator{},
             KeyEqualityChecker p_key_eq_obj = KeyEqualityChecker{}, KeyHashFunc p_key_hash_obj = KeyHashFunc{},
             ValueEqualityChecker p_value_eq_obj = ValueEqualityChecker{})
-      : root_{static_cast<BaseNode *>(new LeafNode)}, size_{sizeof(LeafNode)} {};
+      : root_{static_cast<BaseNode *>(new LeafNode)}, structure_size_(sizeof(LeafNode)) {};
 
   static std::atomic<uint64_t> epoch;
   static const short branch_factor_ = 8;
-  static const short leaf_size_ = 8;
+  static const short leaf_size_ = 8; // cant every be less than 3
   static const uint64_t write_lock_mask_ = static_cast<uint64_t>(0x01) << 63;
   static const uint64_t node_type_mask_ = static_cast<uint64_t>(0x01) << 62;
   static const uint64_t is_deleted_mask_ = static_cast<uint64_t>(0x01) << 61;
@@ -114,6 +114,21 @@ class BPlusTree {
       return children_[0];
     }
 
+    void insert_inner(KeyType key, BaseNode* child) {
+      uint16_t j = 0;
+      while (j < this->size_ && KeyCmpLessEqual(keys_[j], key)) {
+        j++;
+      }
+
+      KeyType insertion_key = key;
+      BaseNode* insertion_child = child;
+      for (; j <= this->size_; j++) {
+        std::swap(keys_[j], insertion_key);
+        std::swap(children_[j + 1], child);
+      }
+      this->size_++;
+    }
+
     std::atomic<BaseNode *> children_[branch_factor_];
     KeyType keys_[branch_factor_ - 1];
   };
@@ -161,10 +176,10 @@ class BPlusTree {
       return false;
     }
 
-    void sort_leaf(LeafNode leaf) {
-      uint16_t num_nodes = leaf.size_.load();
-      auto keys = leaf.keys_;
-      auto values = leaf.values_;
+    void sort_leaf() {
+      uint16_t num_nodes = this->size_.load();
+      auto keys = keys_;
+      auto values = values_;
       std::pair<KeyType, ValueType> pairs[num_nodes];
       for (uint16_t i = 0; i < num_nodes; i++) {
         pairs[i].first = keys[i];
@@ -220,6 +235,87 @@ class BPlusTree {
         return;
       }
     }
+
+    leaf->sort_leaf();
+    structure_size_ += sizeof(LeafNode);
+
+    LeafNode* new_leaf = new LeafNode();
+    uint16_t keep_in_leaf = leaf->size_ / 2;
+    for (uint16_t i = keep_in_leaf; i < leaf->size_; i++) {
+      new_leaf->keys_[i - keep_in_leaf] = leaf->keys_[i];
+      new_leaf->values_[i - keep_in_leaf] = leaf->values_[i];
+    }
+    new_leaf->size_ = leaf->size_ - keep_in_leaf;
+    leaf->size_ = keep_in_leaf;
+
+    if (KeyCmpLess(key, new_leaf->keys_[0])) {
+      leaf->insert(key, val);
+    } else {
+      new_leaf->insert(key, val);
+    }
+
+    new_leaf->left_ = leaf;
+    new_leaf->right_ = leaf->right_;
+    leaf->right_ = new_leaf;
+    if (UNLIKELY(new_leaf->right_ != nullptr)) {
+      new_leaf->right_->left_ = new_leaf;
+    }
+
+    KeyType new_key = new_leaf->keys_[0];
+
+    if (UNLIKELY(locked_nodes.size() == 0)) {
+      TERRIER_ASSERT(leaf == root_, "somehow we had to split a leaf without having to modify the parent");
+      structure_size_ += sizeof(InnerNode);
+      InnerNode* new_root = new InnerNode();
+      new_root->keys_[0] = new_key;
+      new_root->children_[0] = leaf;
+      new_root->children_[1] = new_leaf;
+      root_->size_ = 1;
+      root_ = new_root;
+      return;
+    }
+
+    int32_t i = locked_nodes.size() - 1;
+    InnerNode* old_node = locked_nodes[i];
+    BaseNode* child_node = static_cast<BaseNode *>(new_leaf);
+    InnerNode* new_node;
+    bool splitting_root = locked_nodes[0] == root_ && locked_nodes[0]->size_ == locked_nodes[0]->limit_;
+
+    while (i > 0 && old_node->size_ == old_node->limit_) {
+      structure_size_ += sizeof(InnerNode);
+
+      new_node = new InnerNode();
+      uint16_t keep_in_node = old_node->size_ / 2;
+      for (uint16_t j = keep_in_node; j < old_node->size_; j++) {
+        new_node->keys_[j - keep_in_node] = old_node->keys_[j];
+        new_node->values_[j - keep_in_node] = old_node->values_[j];
+      }
+      old_node->size_ = keep_in_node;
+
+      if (KeyCmpLess(new_key, new_node->keys_[0])) {
+        old_node->insert(new_key, val);
+      } else {
+        new_node->insert(new_key, val);
+      }
+
+      i--;
+    }
+
+    if (splitting_root) {
+      structure_size_ += sizeof(InnerNode);
+      InnerNode* new_root = new InnerNode();
+      new_root->keys_[0] = new_key;
+      new_root->children_[0] = old_node;
+      new_root->children_[1] = new_node;
+      root_->size_ = 1;
+      root_ = new_root;
+    } else {
+      TERRIER_ASSERT(locked_nodes[0]->size_ != locked_nodes[0]->limit_,
+                     "top node in split was full but not the root");
+
+      locked_nodes[0]->insert_inner(new_key, child_node);
+    }
+
   }
 
   inline bool KeyCmpLess(const KeyType &key1, const KeyType &key2) const { return key_cmp_obj(key1, key2); }
@@ -234,8 +330,8 @@ class BPlusTree {
 
   inline bool ValueCmpEqual(const ValueType &v1, const ValueType &v2) { return value_eq_obj(v1, v2); }
 
-  BaseNode *root_;
-  std::atomic<uint64_t> size_;
+  std::atomic<BaseNode *> root_;
+  std::atomic<uint64_t> structure_size_;
 
   // TODO: Check if bool or bool (*) is correct type of predicate
   bool InsertIf(std::function<bool (const ValueType)> predicate, KeyType key, ValueType value);
