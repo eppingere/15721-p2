@@ -108,7 +108,7 @@ class BPlusTree {
 
     BaseNode* findMaxChild(KeyType key) {
       uint16_t i;
-      for (i = this->size_.load(); i >= 0; i--)
+      for (i = this->size_.load(); i > 0; i--)
         if (KeyCmpGreaterEqual(key, keys_[i]))
           return children_[i];
 
