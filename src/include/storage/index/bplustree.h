@@ -36,10 +36,10 @@ class BPlusTree {
   class BaseNode {
    public:
     BaseNode(BPlusTree::NodeType t) :
-    info_(t == NodeType::LEAF ? node_type_mask_ : 0),
-    size_(0),
-    offset_(0),
-    limit_(t == NodeType::LEAF ? leaf_size_ : branch_factor_ - 1) {};
+        info_(t == NodeType::LEAF ? node_type_mask_ : 0),
+        size_(0),
+        offset_(0),
+        limit_(t == NodeType::LEAF ? leaf_size_ : branch_factor_ - 1) {};
     ~BaseNode()=default;
 
     std::atomic<uint64_t> info_;
@@ -100,19 +100,18 @@ class BPlusTree {
     BaseNode* findMinChild(KeyType key) {
       uint16_t i;
       for (i = 0; i < this->size_.load(); i++)
-        if (KeyCmpLessEqual(key, keys_[i]))
+        if (KeyCmpLess(key, keys_[i]))
           return children_[i];
 
       return children_[i];
     }
 
     BaseNode* findMaxChild(KeyType key) {
-      uint16_t i;
-      for (i = this->size_.load(); i > 0; i--)
+      for (uint16_t i = 0; i < this->size_; i++)
         if (KeyCmpGreaterEqual(key, keys_[i]))
-          return children_[i];
+          return children_[i + 1];
 
-      return children_[i];
+      return children_[0];
     }
 
     std::atomic<BaseNode *> children_[branch_factor_];
@@ -128,35 +127,35 @@ class BPlusTree {
 
     bool insert(KeyType key, ValueType value) {
       // look for deleted slot
-      if (size_.load() >= this->limit_.load()) {
+      if (this->size_ >= this->limit_.load()) {
         return false;
       }
 
-      keys_[size_] = key;
-      values_[size_] = value;
-      size_++;
+      keys_[this->size_] = key;
+      values_[this->size_] = value;
+      this->size_++;
 
       return true;
     }
 
-    bool mark_delete(KeyType key, ValueType value) {
+    bool Remove(KeyType key, ValueType value) {
       common::SharedLatch::ScopedExclusiveLatch l(&this->base_latch_);
-      if (size_ == 0) {
+      if (this->size_ == 0) {
         return false;
       }
-      if (KeyCmpEqual(key, keys_[size_ - 1]) && ValueCmpEqual(value, values_[size_ - 1])) {
-        size_--;
+      if (KeyCmpEqual(key, keys_[this->size_ - 1]) && ValueCmpEqual(value, values_[this->size_ - 1])) {
+        this->size_--;
         return true;
       }
 
-      KeyType last_key = keys_[size_ - 1];
-      ValueType last_value = values_[size_ - 1];
+      KeyType last_key = keys_[this->size_ - 1];
+      ValueType last_value = values_[this->size_ - 1];
 
-      for (uint16_t i = 0; i < size_ - 1; i++)
+      for (uint16_t i = 0; i < this->size_ - 1; i++)
         if (KeyCmpEqual(key, keys_[i]) && ValueCmpEqual(value, values_[i])) {
           keys_[i] = last_key;
           values_[i] = last_value;
-          size_--;
+          this->size_--;
           return true;
         }
       return false;
@@ -183,7 +182,7 @@ class BPlusTree {
     bool scan_range(KeyType low, KeyType hi, std::vector<ValueType> *values) {
       common::SharedLatch::ScopedSharedLatch l(&this->base_latch_);
       bool res = true;
-      for (uint16_t i = 0; i < size_.load(); i++) {
+      for (uint16_t i = 0; i < this->size_; i++) {
         if (KeyCmpGreaterEqual(keys_[i], low) && KeyCmpLessEqual(keys_[i], hi))
           values->emplace_back(values_[i]);
         else if (KeyCmpGreater(keys_[i], hi))
@@ -199,9 +198,9 @@ class BPlusTree {
 
   void Insert(KeyType key, ValueType val) {
     std::vector<InnerNode *> locked_nodes;
-    BaseNode* n = this->root_;
+    BaseNode *n = this->root_;
     while (n->get_type() != NodeType::LEAF) {
-      InnerNode* inner_n = static_cast<InnerNode*>(n);
+      InnerNode *inner_n = static_cast<InnerNode *>(n);
       inner_n->base_latch_.LockExclusive();
       if (n->size_ < n->limit_) {
         for (InnerNode *node : locked_nodes) {
@@ -213,15 +212,14 @@ class BPlusTree {
       n = inner_n->findMinChild(key);
     }
 
-
-    LeafNode* leaf = static_cast<LeafNode *>(n);
+    LeafNode *leaf = static_cast<LeafNode *>(n);
     common::SharedLatch::ScopedExclusiveLatch l(&leaf->base_latch_);
     if (leaf->insert(key, val)) {
       for (InnerNode *node : locked_nodes) {
         node->base_latch_.Unlock();
-      return;
+        return;
+      }
     }
-
   }
 
   inline bool KeyCmpLess(const KeyType &key1, const KeyType &key2) const { return key_cmp_obj(key1, key2); }
