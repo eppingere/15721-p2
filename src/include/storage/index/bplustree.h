@@ -163,6 +163,24 @@ class BPlusTree {
       return false;
     }
 
+    void sort_leaf(LeafNode leaf) {
+      uint16_t num_nodes = leaf.size_.load();
+      auto keys = leaf.keys_;
+      auto values = leaf.values_;
+      std::pair<KeyType, ValueType> pairs[num_nodes];
+      for (uint16_t i = 0; i < num_nodes; i++) {
+        pairs[i].first = keys[i];
+        pairs[i].second = values[i];
+      }
+
+      sort(pairs, pairs + num_nodes);
+
+      for (uint16_t i = 0; i < num_nodes; i++) {
+        keys[i] = pairs[i].first;
+        values[i] = pairs[i].second;
+      }
+    }
+
     bool scan_range(KeyType low, KeyType hi, std::vector<ValueType> *values) {
       common::SharedLatch::ScopedSharedLatch l(&this->base_latch_);
       bool res = true;
