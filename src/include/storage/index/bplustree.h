@@ -98,29 +98,21 @@ class BPlusTree {
 
 
     BaseNode* findMinChild(KeyType key) {
-      if (this->size_.load() == 0) {
-        return NULL;
-      } else {
-        uint16_t i;
-        for (i = 0; i < this->size_.load(); i++)
-          if (KeyCmpLessEqual(key, keys_[i]))
-            return children_[i];
+      uint16_t i;
+      for (i = 0; i < this->size_.load(); i++)
+        if (KeyCmpLessEqual(key, keys_[i]))
+          return children_[i];
 
-        return children_[i-1];
-      }
+      return children_[i];
     }
 
     BaseNode* findMaxChild(KeyType key) {
-      if (this->size_.load() == 0) {
-        return NULL;
-      } else {
-        uint16_t i;
-        for (i = this->size_.load() - 1; i >= 0; i--)
-          if (KeyCmpGreaterEqual(key, keys_[i]))
-            return children_[i];
+      uint16_t i;
+      for (i = this->size_.load(); i >= 0; i--)
+        if (KeyCmpGreaterEqual(key, keys_[i]))
+          return children_[i];
 
-        return children_[i];
-      }
+      return children_[i];
     }
 
     std::atomic<BaseNode *> children_[branch_factor_];
