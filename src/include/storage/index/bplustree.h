@@ -385,6 +385,24 @@ class BPlusTree {
     return true;
   }
 
+  std::vector<ValueType> ScanKey(KeyType key) {
+    std::vector<ValueType> value_list;
+    InnerNode *parent;
+    BaseNode *n = this->root_;
+    while (n->get_type() != NodeType::LEAF) {
+      auto *inner_n = static_cast<InnerNode *>(n);
+      inner_n->base_latch_.LockShared();
+      parent = n;
+      n = inner_n->findMinChild(key);
+      parent->base_latch_.Unlock();
+    }
+    auto *leaf = static_cast<LeafNode *>(n);
+    while(leaf != NULL && leaf->scan_range(key, key, &value_list)) {
+      leaf = leaf->right_;
+    }
+    return value_list;
+  }
+
   std::atomic<BaseNode *> root_;
   common::SharedLatch root_latch_;
   std::atomic<uint64_t> structure_size_;
