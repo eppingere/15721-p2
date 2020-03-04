@@ -115,10 +115,8 @@ class BPlusTree {
     }
 
     void insert_inner(KeyType key, BaseNode* child) {
-      uint16_t j = 0;
-      while (j < this->size_ && KeyCmpLessEqual(keys_[j], key)) {
-        j++;
-      }
+      uint16_t j;
+      for (j = 0;j < this->size_ && KeyCmpLessEqual(keys_[j], key); j++) {}
 
       KeyType insertion_key = key;
       BaseNode* insertion_child = child;
@@ -257,7 +255,7 @@ class BPlusTree {
     new_leaf->left_ = leaf;
     new_leaf->right_ = leaf->right_;
     leaf->right_ = new_leaf;
-    if (LIKELY(new_leaf->right_ != nullptr)) {
+    if (UNLIKELY(new_leaf->right_ != nullptr)) {
       new_leaf->right_->left_ = new_leaf;
     }
 
@@ -328,18 +326,6 @@ class BPlusTree {
       node->base_latch_.Unlock();
     }
 
-  }
-
-  void scan_inc(KeyType min, KeyType max, std::vector<ValueType> * values) {
-    bool seen_max = false;
-    for (LeafNode* l = FindMin(min); l != nullptr && !seen_max; l = l->right_) {
-      common::SharedLatch::ScopedSharedLatch latch(&l->base_latch_);
-      for (uint16_t i = 0; i < l->size_; i++)
-        if (KeyCmpLessEqual(l->keys_[i], max))
-          values->emplace_back(l->values_[i]);
-        else
-          seen_max = true;
-    }
   }
 
   inline bool KeyCmpLess(const KeyType &key1, const KeyType &key2) const { return key_cmp_obj(key1, key2); }
