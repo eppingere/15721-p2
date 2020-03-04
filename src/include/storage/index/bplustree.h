@@ -316,8 +316,7 @@ class BPlusTree {
       locked_nodes[0]->insert_inner(new_key, child_node);
     }
   }
-  std::vector<ValueType> ScanKey(KeyType key) {
-    std::vector<ValueType> value_list;
+  void ScanKey(KeyType key, std::vector<ValueType> &values) {
     InnerNode *parent;
     BaseNode *n = this->root_;
     while (n->get_type() != NodeType::LEAF) {
@@ -327,11 +326,10 @@ class BPlusTree {
       n = inner_n->findMinChild(key);
       parent->base_latch_.Unlock();
     }
-    auto *leaf = static_cast<LeafNode *>(n);
-    while(leaf != NULL && leaf->scan_range(key, key, &value_list)) {
+    auto leaf = static_cast<LeafNode *>(n);
+    while(leaf != NULL && leaf->scan_range(key, key, &values)) {
       leaf = leaf->right_;
     }
-    return value_list;
   }
 
     inline bool KeyCmpLess(const KeyType &key1, const KeyType &key2) const { return key_cmp_obj(key1, key2); }
