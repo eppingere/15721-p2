@@ -97,13 +97,13 @@ class BPlusTree {
     ~InnerNode()=default;
 
 
-    BaseNode* findMinChild(KeyType key) {
+    uint16_t findMinChild(KeyType key) {
       uint16_t i;
       for (i = 0; i < this->size_.load(); i++)
         if (KeyCmpLess(key, keys_[i]))
-          return children_[i];
+          return i;
 
-      return children_[i];
+      return i;
     }
 
     BaseNode* findMaxChild(KeyType key) {
@@ -115,16 +115,14 @@ class BPlusTree {
     }
 
     void insert_inner(KeyType key, BaseNode* child) {
-      uint16_t j = 0;
-      while (j < this->size_ && KeyCmpLessEqual(keys_[j], key)) {
-        j++;
-      }
+      uint16_t j;
+      for (j = 0;j < this->size_ && KeyCmpLess(key, keys_[j]); j++) {}
 
       KeyType insertion_key = key;
       BaseNode* insertion_child = child;
       for (; j <= this->size_; j++) {
         std::swap(keys_[j], insertion_key);
-        std::swap(children_[j + 1], child);
+        std::swap(children_[j + 1], insertion_child);
       }
       this->size_++;
     }
@@ -213,7 +211,10 @@ class BPlusTree {
 
   void Insert(KeyType key, ValueType val) {
     std::vector<InnerNode *> locked_nodes;
+    std::vector<uint16_t> traversal_indices;
     BaseNode *n = this->root_;
+
+    // Find minimum leaf that stores would store key, taking locks as we go down tree
     while (n->get_type() != NodeType::LEAF) {
       InnerNode *inner_n = static_cast<InnerNode *>(n);
       inner_n->base_latch_.LockExclusive();
@@ -222,38 +223,50 @@ class BPlusTree {
           node->base_latch_.Unlock();
         }
         locked_nodes.clear();
+        traversal_indices.clear();
       }
+      uint16_t child_index = inner_n->findMinChild(key);
+      n = inner_n->children_[child_index];
       locked_nodes.emplace_back(inner_n);
-      n = inner_n->findMinChild(key);
+      traversal_indices.emplace_back(child_index);
     }
 
+    // If leaf is not full, insert, unlock all parent nodes and return
     LeafNode *leaf = static_cast<LeafNode *>(n);
     common::SharedLatch::ScopedExclusiveLatch l(&leaf->base_latch_);
     if (leaf->insert(key, val)) {
       for (InnerNode *node : locked_nodes) {
         node->base_latch_.Unlock();
-        return;
       }
+      return;
     }
 
+    // Otherwise must split so create new leaf after sorting current leaf
     leaf->sort_leaf();
     structure_size_ += sizeof(LeafNode);
-
     LeafNode* new_leaf = new LeafNode();
+
+    // Determine keys and values to stay in current leaf and copy others to new leaf
     uint16_t keep_in_leaf = leaf->size_ / 2;
     for (uint16_t i = keep_in_leaf; i < leaf->size_; i++) {
       new_leaf->keys_[i - keep_in_leaf] = leaf->keys_[i];
       new_leaf->values_[i - keep_in_leaf] = leaf->values_[i];
     }
+
+    // Update sizes of current and newly created leaf
     new_leaf->size_ = leaf->size_ - keep_in_leaf;
     leaf->size_ = keep_in_leaf;
 
+    // Insert given key and value into appropriate leaf
     if (KeyCmpLess(key, new_leaf->keys_[0])) {
       leaf->insert(key, val);
+      leaf->sort_leaf();
     } else {
       new_leaf->insert(key, val);
+      new_leaf->sort_leaf();
     }
 
+    // Update neighbor pointers for leaf nodes
     new_leaf->left_ = leaf;
     new_leaf->right_ = leaf->right_;
     leaf->right_ = new_leaf;
@@ -261,10 +274,13 @@ class BPlusTree {
       new_leaf->right_->left_ = new_leaf;
     }
 
+    // Determine pointer to new leaf to be pushed up to parent node
     KeyType new_key = new_leaf->keys_[0];
 
+    // If split is on root (leaf)
     if (UNLIKELY(locked_nodes.size() == 0)) {
       TERRIER_ASSERT(leaf == root_, "somehow we had to split a leaf without having to modify the parent");
+      // Create new root and update attributes for new root and tree
       structure_size_ += sizeof(InnerNode);
       InnerNode* new_root = new InnerNode();
       new_root->keys_[0] = new_key;
@@ -275,33 +291,37 @@ class BPlusTree {
       return;
     }
 
-    int32_t i = locked_nodes.size() - 1;
-    InnerNode* old_node = locked_nodes[i];
-    BaseNode* child_node = static_cast<BaseNode *>(new_leaf);
-    InnerNode* new_node;
-    bool splitting_root = locked_nodes[0] == root_ && locked_nodes[0]->size_ == locked_nodes[0]->limit_;
 
-    while (i > 0 && old_node->size_ == old_node->limit_) {
-      structure_size_ += sizeof(InnerNode);
+    InnerNode* old_node, *new_node;
+    BaseNode* new_child = static_cast<BaseNode *>(new_leaf);
 
+    for (uint64_t i = locked_nodes.size() - 1; i > 0; i--) {
+      old_node = locked_nodes[i];
+      uint16_t child_index = traversal_indices[i];
+      structure_size_+= sizeof(InnerNode);
       new_node = new InnerNode();
-      uint16_t keep_in_node = old_node->size_ / 2;
-      for (uint16_t j = keep_in_node; j < old_node->size_; j++) {
-        new_node->keys_[j - keep_in_node] = old_node->keys_[j];
-        new_node->values_[j - keep_in_node] = old_node->values_[j];
-      }
-      old_node->size_ = keep_in_node;
-
-      if (KeyCmpLess(new_key, new_node->keys_[0])) {
-        old_node->insert(new_key, val);
-      } else {
-        new_node->insert(new_key, val);
+      for (uint16_t node_index = child_index; node_index < old_node->size_; node_index++) {
+        std::swap(new_key, old_node->keys_[node_index]);
+        std::swap(new_child, old_node->children_[node_index + 1]);
       }
 
-      i--;
+      uint16_t lower_length = old_node->size_ / 2;
+      new_node->size_ = old_node->size_ - lower_length;
+      new_node->keys_[new_node->size_ - 1] = new_key;
+      new_node->children_[new_node->size_] = new_child;
+
+      for (uint16_t node_index = lower_length + 1; node_index < old_node->size_; node_index++) {
+        new_node->keys_[node_index - lower_length - 1] = old_node->keys_[node_index];
+        new_node->children_[node_index - lower_length] = old_node->children_[node_index + 1];
+      }
+      new_node->children_[0] = old_node->children_[lower_length + 1];
+      old_node->size_ = lower_length;
+      new_key = old_node->keys_[lower_length];
+      new_child = static_cast<BaseNode *>(new_node);
     }
 
-    if (splitting_root) {
+    // Root is being split so must create new root node
+    if (locked_nodes[0] == root_ && locked_nodes[0]->size_ == locked_nodes[0]->limit_) {
       structure_size_ += sizeof(InnerNode);
       InnerNode* new_root = new InnerNode();
       new_root->keys_[0] = new_key;
@@ -313,7 +333,12 @@ class BPlusTree {
       TERRIER_ASSERT(locked_nodes[0]->size_ != locked_nodes[0]->limit_,
                      "top node in split was full but not the root");
 
-      locked_nodes[0]->insert_inner(new_key, child_node);
+      locked_nodes[0]->insert_inner(new_key, new_child);
+    }
+
+    // Unlock all latches incurred on insert
+    for (InnerNode* node : locked_nodes) {
+      node->base_latch_.Unlock();
     }
 
   }
@@ -331,12 +356,13 @@ class BPlusTree {
   inline bool ValueCmpEqual(const ValueType &v1, const ValueType &v2) { return value_eq_obj(v1, v2); }
 
   std::atomic<BaseNode *> root_;
+  common::SharedLatch root_latch_;
   std::atomic<uint64_t> structure_size_;
 
   // TODO: Check if bool or bool (*) is correct type of predicate
   bool InsertIf(std::function<bool (const ValueType)> predicate, KeyType key, ValueType value);
-  LeafNode* FindMin(KeyType key);
-  LeafNode* FindMax(KeyType key);
+  LeafNode* FindMin(KeyType key) {}
+  LeafNode* FindMax(KeyType key) {}
   void FindRange(KeyType min_key, KeyType max_key, bool is_increasing, std::vector <ValueType> *results);
 };
 
