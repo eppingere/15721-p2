@@ -20,6 +20,13 @@ class BPlusTree {
             ValueEqualityChecker p_value_eq_obj = ValueEqualityChecker{})
       : root_{static_cast<BaseNode *>(new LeafNode)}, structure_size_(sizeof(LeafNode)) {};
 
+  inline bool KeyCmpLess(const KeyType &key1, const KeyType &key2) const { return key_cmp_obj(key1, key2); }
+  inline bool KeyCmpEqual(const KeyType &key1, const KeyType &key2) const { return key_eq_obj(key1, key2); }
+  inline bool KeyCmpGreaterEqual(const KeyType &key1, const KeyType &key2) const { return !KeyCmpLess(key1, key2); }
+  inline bool KeyCmpGreater(const KeyType &key1, const KeyType &key2) const { return KeyCmpLess(key2, key1); }
+  inline bool KeyCmpLessEqual(const KeyType &key1, const KeyType &key2) const { return !KeyCmpGreater(key1, key2); }
+  inline bool ValueCmpEqual(const ValueType &v1, const ValueType &v2) { return value_eq_obj(v1, v2); }
+
   static std::atomic<uint64_t> epoch;
   static const short branch_factor_ = 8;
   static const short leaf_size_ = 8; // cant every be less than 3
@@ -93,6 +100,7 @@ class BPlusTree {
 
   class InnerNode : public BaseNode {
    public:
+    friend class BplusTree;
     InnerNode() : BaseNode(NodeType::INNER_NODE) {};
     ~InnerNode()=default;
 
@@ -100,7 +108,7 @@ class BPlusTree {
     uint16_t findMinChild(KeyType key) {
       uint16_t i;
       for (i = 0; i < this->size_.load(); i++)
-        if (KeyCmpLess(key, keys_[i]))
+        if (KeyCmpLess(key, this->keys_[i]))
           return i;
 
       return i;
@@ -138,14 +146,32 @@ class BPlusTree {
     LeafNode() : BaseNode(NodeType::LEAF), left_(nullptr), right_(nullptr) {};
     ~LeafNode()=default;
 
-    bool insert(KeyType key, ValueType value) {
+    bool insert(KeyType key, ValueType value, std::function<bool(const ValueType)> predicate, bool *predicate_satisfied) {
       // look for deleted slot
       if (this->size_ >= this->limit_.load()) {
         return false;
       }
 
-      keys_[this->size_] = key;
-      values_[this->size_] = value;
+      KeyType insert_key = key;
+      ValueType insert_val = value;
+      uint16_t i;
+      *predicate_satisfied = false;
+      for (i = 0; i < this->size_; i++) {
+        if (KeyCmpEqual(key, keys_[i]) && predicate(values_[i])) {
+          *predicate_satisfied = true;
+          return false;
+        } else if (KeyCmpLess(key, keys_[i])) {
+          break;
+        }
+      }
+
+      for (; i < this->size_; i++) {
+        std::swap(insert_key, keys_[i]);
+        std::swap(insert_val, values_[i]);
+      }
+
+      keys_[i] = insert_key;
+      values_[i] = insert_val;
       this->size_++;
 
       return true;
@@ -209,7 +235,7 @@ class BPlusTree {
     ValueType values_[leaf_size_];
   };
 
-  void Insert(KeyType key, ValueType val) {
+  bool Insert(std::function<bool (const ValueType)> predicate, KeyType key, ValueType val, bool* predicate_satisfied) {
     std::vector<InnerNode *> locked_nodes;
     std::vector<uint16_t> traversal_indices;
     BaseNode *n = this->root_;
@@ -234,11 +260,11 @@ class BPlusTree {
     // If leaf is not full, insert, unlock all parent nodes and return
     LeafNode *leaf = static_cast<LeafNode *>(n);
     common::SharedLatch::ScopedExclusiveLatch l(&leaf->base_latch_);
-    if (leaf->insert(key, val)) {
+    if (leaf->insert(key, val, predicate, predicate_satisfied) || predicate_satisfied) {
       for (InnerNode *node : locked_nodes) {
         node->base_latch_.Unlock();
       }
-      return;
+      return !predicate_satisfied;
     }
 
     // Otherwise must split so create new leaf after sorting current leaf
@@ -259,19 +285,19 @@ class BPlusTree {
 
     // Insert given key and value into appropriate leaf
     if (KeyCmpLess(key, new_leaf->keys_[0])) {
-      leaf->insert(key, val);
+      leaf->insert(key, val, predicate, predicate_satisfied);
       leaf->sort_leaf();
     } else {
-      new_leaf->insert(key, val);
+      new_leaf->insert(key, val, predicate, predicate_satisfied);
       new_leaf->sort_leaf();
     }
 
     // Update neighbor pointers for leaf nodes
     new_leaf->left_ = leaf;
-    new_leaf->right_ = leaf->right_;
+    new_leaf->right_ = leaf->right_.load();
     leaf->right_ = new_leaf;
     if (UNLIKELY(new_leaf->right_ != nullptr)) {
-      new_leaf->right_->left_ = new_leaf;
+      new_leaf->right_.load()->left_ = new_leaf;
     }
 
     // Determine pointer to new leaf to be pushed up to parent node
@@ -286,9 +312,9 @@ class BPlusTree {
       new_root->keys_[0] = new_key;
       new_root->children_[0] = leaf;
       new_root->children_[1] = new_leaf;
-      root_->size_ = 1;
+      root_.load()->size_ = 1;
       root_ = new_root;
-      return;
+      return true;
     }
 
 
@@ -302,7 +328,9 @@ class BPlusTree {
       new_node = new InnerNode();
       for (uint16_t node_index = child_index; node_index < old_node->size_; node_index++) {
         std::swap(new_key, old_node->keys_[node_index]);
-        std::swap(new_child, old_node->children_[node_index + 1]);
+        BaseNode* temp = new_child;
+        new_child = old_node->children_[node_index + 1];
+        old_node->children_[node_index + 1] = temp;
       }
 
       uint16_t lower_length = old_node->size_ / 2;
@@ -312,9 +340,9 @@ class BPlusTree {
 
       for (uint16_t node_index = lower_length + 1; node_index < old_node->size_; node_index++) {
         new_node->keys_[node_index - lower_length - 1] = old_node->keys_[node_index];
-        new_node->children_[node_index - lower_length] = old_node->children_[node_index + 1];
+        new_node->children_[node_index - lower_length] = old_node->children_[node_index + 1].load();
       }
-      new_node->children_[0] = old_node->children_[lower_length + 1];
+      new_node->children_[0] = old_node->children_[lower_length + 1].load();
       old_node->size_ = lower_length;
       new_key = old_node->keys_[lower_length];
       new_child = static_cast<BaseNode *>(new_node);
@@ -327,7 +355,7 @@ class BPlusTree {
       new_root->keys_[0] = new_key;
       new_root->children_[0] = old_node;
       new_root->children_[1] = new_node;
-      root_->size_ = 1;
+      root_.load()->size_ = 1;
       root_ = new_root;
     } else {
       TERRIER_ASSERT(locked_nodes[0]->size_ != locked_nodes[0]->limit_,
@@ -340,27 +368,14 @@ class BPlusTree {
     for (InnerNode* node : locked_nodes) {
       node->base_latch_.Unlock();
     }
-
+    return true;
   }
-
-  inline bool KeyCmpLess(const KeyType &key1, const KeyType &key2) const { return key_cmp_obj(key1, key2); }
-
-  inline bool KeyCmpEqual(const KeyType &key1, const KeyType &key2) const { return key_eq_obj(key1, key2); }
-
-  inline bool KeyCmpGreaterEqual(const KeyType &key1, const KeyType &key2) const { return !KeyCmpLess(key1, key2); }
-
-  inline bool KeyCmpGreater(const KeyType &key1, const KeyType &key2) const { return KeyCmpLess(key2, key1); }
-
-  inline bool KeyCmpLessEqual(const KeyType &key1, const KeyType &key2) const { return !KeyCmpGreater(key1, key2); }
-
-  inline bool ValueCmpEqual(const ValueType &v1, const ValueType &v2) { return value_eq_obj(v1, v2); }
 
   std::atomic<BaseNode *> root_;
   common::SharedLatch root_latch_;
   std::atomic<uint64_t> structure_size_;
 
   // TODO: Check if bool or bool (*) is correct type of predicate
-  bool InsertIf(std::function<bool (const ValueType)> predicate, KeyType key, ValueType value);
   LeafNode* FindMin(KeyType key) {}
   LeafNode* FindMax(KeyType key) {}
   void FindRange(KeyType min_key, KeyType max_key, bool is_increasing, std::vector <ValueType> *results);

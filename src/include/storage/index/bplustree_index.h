@@ -41,7 +41,7 @@ class BPlusTreeIndex final : public Index {
 
   size_t GetHeapUsage() const final {
     // FIXME(15-721 project2): access the underlying data structure and report the heap usage
-    return 0;
+    return bplustree_->structure_size_;
   }
 
   bool Insert(const common::ManagedPointer<transaction::TransactionContext> txn, const ProjectedRow &tuple,
@@ -84,7 +84,7 @@ class BPlusTreeIndex final : public Index {
 
     // FIXME(15-721 project2): perform a non-unique CONDITIONAL insert into the underlying data structure of the
     // key/value pair
-    const bool UNUSED_ATTRIBUTE result = true;
+    const bool UNUSED_ATTRIBUTE result = bplustree_->Insert(predicate, index_key, location, &predicate_satisfied);
 
     TERRIER_ASSERT(predicate_satisfied != result, "If predicate is not satisfied then insertion should succeed.");
 
