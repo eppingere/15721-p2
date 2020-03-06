@@ -53,13 +53,10 @@ class BPlusTreeIndex final : public Index {
     // FIXME(15-721 project2): perform a non-unique unconditional insert into the underlying data structure of the
     // key/value pair
 
-    auto predicate UNUSED_ATTRIBUTE = [](const TupleSlot slot) -> bool {
-      return false;
-    };
+    auto predicate UNUSED_ATTRIBUTE = [](const TupleSlot slot) -> bool { return false; };
     bool predicate_satisfied = false;
 
     const bool UNUSED_ATTRIBUTE result = bplustree_->Insert(predicate, index_key, location, &predicate_satisfied);
-
 
     TERRIER_ASSERT(
         result && !predicate_satisfied,
