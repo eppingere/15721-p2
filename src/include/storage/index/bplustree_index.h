@@ -52,10 +52,17 @@ class BPlusTreeIndex final : public Index {
     index_key.SetFromProjectedRow(tuple, metadata_, metadata_.GetSchema().GetColumns().size());
     // FIXME(15-721 project2): perform a non-unique unconditional insert into the underlying data structure of the
     // key/value pair
-    const bool UNUSED_ATTRIBUTE result = true;
+
+    auto predicate UNUSED_ATTRIBUTE = [](const TupleSlot slot) -> bool {
+      return false;
+    };
+    bool predicate_satisfied = false;
+
+    const bool UNUSED_ATTRIBUTE result = bplustree_->Insert(predicate, index_key, location, &predicate_satisfied);
+
 
     TERRIER_ASSERT(
-        result,
+        result && !predicate_satisfied,
         "non-unique index shouldn't fail to insert. If it did, something went wrong deep inside the BPlusTree itself.");
     // Register an abort action with the txn context in case of rollback
     txn->RegisterAbortAction([=]() {

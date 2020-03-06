@@ -17,8 +17,19 @@ class BPlusTree {
  public:
   BPlusTree(KeyComparator p_key_cmp_obj = KeyComparator{},
             KeyEqualityChecker p_key_eq_obj = KeyEqualityChecker{}, KeyHashFunc p_key_hash_obj = KeyHashFunc{},
-            ValueEqualityChecker p_value_eq_obj = ValueEqualityChecker{})
-      : root_{static_cast<BaseNode *>(new LeafNode)}, structure_size_(sizeof(LeafNode)) {};
+            ValueEqualityChecker p_value_eq_obj = ValueEqualityChecker{}) :
+            key_cmp_obj{p_key_cmp_obj},
+            key_eq_obj{p_key_eq_obj},
+            value_eq_obj{p_value_eq_obj},
+            structure_size_ {sizeof(LeafNode)}
+            {
+              root_ = static_cast<BaseNode *>(new LeafNode(this));
+            };
+
+
+  KeyComparator key_cmp_obj;
+  KeyEqualityChecker key_eq_obj;
+  ValueEqualityChecker value_eq_obj;
 
   inline bool KeyCmpLess(const KeyType &key1, const KeyType &key2) const { return key_cmp_obj(key1, key2); }
   inline bool KeyCmpEqual(const KeyType &key1, const KeyType &key2) const { return key_eq_obj(key1, key2); }
@@ -42,12 +53,15 @@ class BPlusTree {
 
   class BaseNode {
    public:
-    BaseNode(BPlusTree::NodeType t) :
+    BaseNode(BPlusTree* tree, BPlusTree::NodeType t) :
+        tree_(tree),
         info_(t == NodeType::LEAF ? node_type_mask_ : 0),
         size_(0),
         offset_(0),
         limit_(t == NodeType::LEAF ? leaf_size_ : branch_factor_ - 1) {};
     ~BaseNode()=default;
+
+    BPlusTree* tree_;
 
     std::atomic<uint64_t> info_;
     std::atomic<uint16_t> size_, offset_, limit_;
@@ -95,20 +109,20 @@ class BPlusTree {
       return info_.load() & delete_epoch_mask_;
     }
 
-    inline NodeType get_type() { return static_cast<NodeType>(info_ & node_type_mask_); }
+    inline NodeType get_type() { return static_cast<NodeType>((info_ & node_type_mask_) >> 62); }
   };
 
   class InnerNode : public BaseNode {
    public:
     friend class BplusTree;
-    InnerNode() : BaseNode(NodeType::INNER_NODE) {};
+    InnerNode(BPlusTree* tree) : BaseNode(tree, NodeType::INNER_NODE) {};
     ~InnerNode()=default;
 
 
     uint16_t findMinChild(KeyType key) {
       uint16_t i;
       for (i = 0; i < this->size_.load(); i++)
-        if (KeyCmpLess(key, this->keys_[i]))
+        if (this->tree_->KeyCmpLess(key, this->keys_[i]))
           return i;
 
       return i;
@@ -116,7 +130,7 @@ class BPlusTree {
 
     BaseNode* findMaxChild(KeyType key) {
       for (uint16_t i = 0; i < this->size_; i++)
-        if (KeyCmpGreaterEqual(key, keys_[i]))
+        if (this->tree_->KeyCmpGreaterEqual(key, keys_[i]))
           return children_[i + 1];
 
       return children_[0];
@@ -124,13 +138,15 @@ class BPlusTree {
 
     void insert_inner(KeyType key, BaseNode* child) {
       uint16_t j;
-      for (j = 0;j < this->size_ && KeyCmpLess(key, keys_[j]); j++) {}
+      for (j = 0;j < this->size_ && this->tree_->KeyCmpLess(key, keys_[j]); j++) {}
 
       KeyType insertion_key = key;
       BaseNode* insertion_child = child;
       for (; j <= this->size_; j++) {
         std::swap(keys_[j], insertion_key);
-        std::swap(children_[j + 1], insertion_child);
+        auto temp_child = insertion_child;
+        insertion_child = children_[j+1];
+        children_[j+1] = temp_child;
       }
       this->size_++;
     }
@@ -143,7 +159,7 @@ class BPlusTree {
    public:
     static const uint64_t delete_mask_size_ = 64;
 
-    LeafNode() : BaseNode(NodeType::LEAF), left_(nullptr), right_(nullptr) {};
+    LeafNode(BPlusTree* tree) : BaseNode(tree, NodeType::LEAF), left_(nullptr), right_(nullptr) {};
     ~LeafNode()=default;
 
     bool insert(KeyType key, ValueType value, std::function<bool(const ValueType)> predicate, bool *predicate_satisfied) {
@@ -157,10 +173,10 @@ class BPlusTree {
       uint16_t i;
       *predicate_satisfied = false;
       for (i = 0; i < this->size_; i++) {
-        if (KeyCmpEqual(key, keys_[i]) && predicate(values_[i])) {
+        if (this->tree_->KeyCmpEqual(key, keys_[i]) && predicate(values_[i])) {
           *predicate_satisfied = true;
           return false;
-        } else if (KeyCmpLess(key, keys_[i])) {
+        } else if (this->tree_->KeyCmpLess(key, keys_[i])) {
           break;
         }
       }
@@ -182,7 +198,7 @@ class BPlusTree {
       if (this->size_ == 0) {
         return false;
       }
-      if (KeyCmpEqual(key, keys_[this->size_ - 1]) && ValueCmpEqual(value, values_[this->size_ - 1])) {
+      if (this->tree_->KeyCmpEqual(key, keys_[this->size_ - 1]) && this->tree_->ValueCmpEqual(value, values_[this->size_ - 1])) {
         this->size_--;
         return true;
       }
@@ -191,7 +207,7 @@ class BPlusTree {
       ValueType last_value = values_[this->size_ - 1];
 
       for (uint16_t i = 0; i < this->size_ - 1; i++)
-        if (KeyCmpEqual(key, keys_[i]) && ValueCmpEqual(value, values_[i])) {
+        if (this->tree_->KeyCmpEqual(key, keys_[i]) && this->tree_->ValueCmpEqual(value, values_[i])) {
           keys_[i] = last_key;
           values_[i] = last_value;
           this->size_--;
@@ -200,31 +216,35 @@ class BPlusTree {
       return false;
     }
 
-    void sort_leaf() {
-      uint16_t num_nodes = this->size_.load();
-      auto keys = keys_;
-      auto values = values_;
-      std::pair<KeyType, ValueType> pairs[num_nodes];
-      for (uint16_t i = 0; i < num_nodes; i++) {
-        pairs[i].first = keys[i];
-        pairs[i].second = values[i];
-      }
+//    bool compare_pair (std::pair<KeyType,ValueType> a,  std::pair<KeyType,ValueType> b) {
+//      return this->tree_->KeyCmpLess(a.first, b.first);
+//    }
 
-      sort(pairs, pairs + num_nodes);
-
-      for (uint16_t i = 0; i < num_nodes; i++) {
-        keys[i] = pairs[i].first;
-        values[i] = pairs[i].second;
-      }
-    }
+//    void sort_leaf() {
+//      uint16_t num_nodes = this->size_.load();
+//      auto keys = keys_;
+//      auto values = values_;
+//      std::pair<KeyType, ValueType> pairs[num_nodes];
+//      for (uint16_t i = 0; i < num_nodes; i++) {
+//        pairs[i].first = keys[i];
+//        pairs[i].second = values[i];
+//      }
+//
+//      sort(pairs, pairs + num_nodes, compare_pair);
+//
+//      for (uint16_t i = 0; i < num_nodes; i++) {
+//        keys[i] = pairs[i].first;
+//        values[i] = pairs[i].second;
+//      }
+//    }
 
     bool scan_range(KeyType low, KeyType hi, std::vector<ValueType> *values) {
       common::SharedLatch::ScopedSharedLatch l(&this->base_latch_);
       bool res = true;
       for (uint16_t i = 0; i < this->size_; i++) {
-        if (KeyCmpGreaterEqual(keys_[i], low) && KeyCmpLessEqual(keys_[i], hi))
+        if (this->tree_->KeyCmpGreaterEqual(keys_[i], low) && this->tree_->KeyCmpLessEqual(keys_[i], hi))
           values->emplace_back(values_[i]);
-        else if (KeyCmpGreater(keys_[i], hi))
+        else if (this->tree_->KeyCmpGreater(keys_[i], hi))
           res = false;
       }
       return res;
@@ -268,9 +288,9 @@ class BPlusTree {
     }
 
     // Otherwise must split so create new leaf after sorting current leaf
-    leaf->sort_leaf();
+//    leaf->sort_leaf();
     structure_size_ += sizeof(LeafNode);
-    LeafNode* new_leaf = new LeafNode();
+    LeafNode* new_leaf = new LeafNode(this);
 
     // Determine keys and values to stay in current leaf and copy others to new leaf
     uint16_t keep_in_leaf = leaf->size_ / 2;
@@ -286,10 +306,10 @@ class BPlusTree {
     // Insert given key and value into appropriate leaf
     if (KeyCmpLess(key, new_leaf->keys_[0])) {
       leaf->insert(key, val, predicate, predicate_satisfied);
-      leaf->sort_leaf();
+//      leaf->sort_leaf();
     } else {
       new_leaf->insert(key, val, predicate, predicate_satisfied);
-      new_leaf->sort_leaf();
+//      new_leaf->sort_leaf();
     }
 
     // Update neighbor pointers for leaf nodes
@@ -308,7 +328,7 @@ class BPlusTree {
       TERRIER_ASSERT(leaf == root_, "somehow we had to split a leaf without having to modify the parent");
       // Create new root and update attributes for new root and tree
       structure_size_ += sizeof(InnerNode);
-      InnerNode* new_root = new InnerNode();
+      InnerNode* new_root = new InnerNode(this);
       new_root->keys_[0] = new_key;
       new_root->children_[0] = leaf;
       new_root->children_[1] = new_leaf;
@@ -325,7 +345,7 @@ class BPlusTree {
       old_node = locked_nodes[i];
       uint16_t child_index = traversal_indices[i];
       structure_size_+= sizeof(InnerNode);
-      new_node = new InnerNode();
+      new_node = new InnerNode(this);
       for (uint16_t node_index = child_index; node_index < old_node->size_; node_index++) {
         std::swap(new_key, old_node->keys_[node_index]);
         BaseNode* temp = new_child;
@@ -351,7 +371,7 @@ class BPlusTree {
     // Root is being split so must create new root node
     if (locked_nodes[0] == root_ && locked_nodes[0]->size_ == locked_nodes[0]->limit_) {
       structure_size_ += sizeof(InnerNode);
-      InnerNode* new_root = new InnerNode();
+      InnerNode* new_root = new InnerNode(this);
       new_root->keys_[0] = new_key;
       new_root->children_[0] = old_node;
       new_root->children_[1] = new_node;
