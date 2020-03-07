@@ -4,7 +4,8 @@
 #include <execution/util/execution_common.h>
 #include <storage/storage_defs.h>
 #include <functional>
-#include <iostream>
+#include <utility>
+#include <vector>
 
 #include "common/macros.h"
 
@@ -36,8 +37,8 @@ class BPlusTree {
   inline bool ValueCmpEqual(const ValueType &v1, const ValueType &v2) { return value_eq_obj(v1, v2); }
 
   static std::atomic<uint64_t> epoch;
-  static const short branch_factor_ = 8;
-  static const short leaf_size_ = 8;  // cant every be less than 3
+  static const uint16_t branch_factor_ = 8;
+  static const uint16_t leaf_size_ = 8;  // cant every be less than 3
   static const uint64_t write_lock_mask_ = static_cast<uint64_t>(0x01) << 63;
   static const uint64_t node_type_mask_ = static_cast<uint64_t>(0x01) << 62;
   static const uint64_t is_deleted_mask_ = static_cast<uint64_t>(0x01) << 61;
@@ -55,7 +56,7 @@ class BPlusTree {
           info_(t == NodeType::LEAF ? node_type_mask_ : 0),
           size_(0),
           offset_(0),
-          limit_(t == NodeType::LEAF ? leaf_size_ : branch_factor_ - 1){};
+          limit_(t == NodeType::LEAF ? leaf_size_ : branch_factor_ - 1) {}
     ~BaseNode() = default;
 
     BPlusTree *tree_;
@@ -64,54 +65,13 @@ class BPlusTree {
     std::atomic<uint16_t> size_, offset_, limit_;
     common::SharedLatch base_latch_;
 
-    inline void write_lock() {
-      while (true) {
-        uint64_t old_value = info_.load();
-        uint64_t not_locked = old_value | (~write_lock_mask_);
-        uint64_t locked = old_value | write_lock_mask_;
-        if (!info_.compare_exchange_strong(not_locked, locked)) {
-          continue;
-        }
-        break;
-      }
-    };
-
-    inline void write_unlock() {
-      TERRIER_ASSERT(info_.load() & write_lock_mask_, "unlock called on unlocked inner node");
-      while (true) {
-        uint64_t old_meta_data = info_.load();
-        if (!info_.compare_exchange_strong(old_meta_data, old_meta_data & (~write_lock_mask_))) {
-          continue;
-        }
-        break;
-      }
-    };
-
-    inline void mark_delete() {
-      TERRIER_ASSERT(!(info_.load() & is_deleted_mask_), "tried to mark as deleted already deleted node");
-      while (true) {
-        uint64_t old_meta_data = info_.load() & (~delete_epoch_mask_);
-        uint64_t e = epoch.load() & delete_epoch_mask_;
-
-        if (!info_.compare_exchange_strong(old_meta_data, old_meta_data | is_deleted_mask_ | e)) {
-          continue;
-        }
-        break;
-      }
-    }
-
-    inline uint64_t get_delete_epoch() {
-      TERRIER_ASSERT(info_.load() & is_deleted_mask_, "got delete epoch of non deleted node");
-      return info_.load() & delete_epoch_mask_;
-    }
-
     inline NodeType get_type() { return static_cast<NodeType>((info_ & node_type_mask_) >> 62); }
   };
 
   class InnerNode : public BaseNode {
    public:
     friend class BplusTree;
-    InnerNode(BPlusTree *tree) : BaseNode(tree, NodeType::INNER_NODE){};
+    explicit InnerNode(BPlusTree *tree) : BaseNode(tree, NodeType::INNER_NODE) {}
     ~InnerNode() = default;
 
     uint16_t findMinChild(KeyType key) {
@@ -153,13 +113,13 @@ class BPlusTree {
    public:
     static const uint64_t delete_mask_size_ = 64;
 
-    LeafNode(BPlusTree *tree) : BaseNode(tree, NodeType::LEAF), left_(nullptr), right_(nullptr) {};
+    explicit LeafNode(BPlusTree *tree) : BaseNode(tree, NodeType::LEAF), left_(nullptr), right_(nullptr) {}
     ~LeafNode() = default;
 
-    bool scan_predicate(KeyType key,  std::function<bool(const ValueType)> predicate) {
-      LeafNode* current_leaf = this;
+    bool scan_predicate(KeyType key, std::function<bool(const ValueType)> predicate) {
+      LeafNode *current_leaf = this;
       bool no_bigger_keys = true;
-      while(current_leaf != nullptr && no_bigger_keys) {
+      while (current_leaf != nullptr && no_bigger_keys) {
         common::SharedLatch::ScopedSharedLatch l(&current_leaf->base_latch_);
         for (uint16_t i = 0; i < current_leaf->size_; i++) {
           if (current_leaf->tree_->KeyCmpEqual(key, current_leaf->keys_[i]) && predicate(current_leaf->values_[i])) {
@@ -189,7 +149,8 @@ class BPlusTree {
         }
       }
 
-      if (i == this->size_ && this->right_ != nullptr && (*predicate_satisfied = this->right_.load()->scan_predicate(key, predicate))) {
+      if (i == this->size_ && this->right_ != nullptr &&
+          (*predicate_satisfied = this->right_.load()->scan_predicate(key, predicate))) {
         return false;
       }
 
@@ -254,7 +215,7 @@ class BPlusTree {
     std::vector<InnerNode *> locked_nodes;
     std::vector<uint16_t> traversal_indices;
     BaseNode *n = this->root_;
-//    std::cout << "insert called" << std::endl;
+    //    std::cout << "insert called" << std::endl;
 
     // Find minimum leaf that stores would store key, taking locks as we go down tree
     while (n->get_type() != NodeType::LEAF) {
@@ -276,15 +237,15 @@ class BPlusTree {
     // If leaf is not full, insert, unlock all parent nodes and return
     LeafNode *leaf = static_cast<LeafNode *>(n);
     common::SharedLatch::ScopedExclusiveLatch l(&leaf->base_latch_);
-//    std::cout << "Initial size: " << leaf->size_ << std::endl;
+    //    std::cout << "Initial size: " << leaf->size_ << std::endl;
     if (leaf->insert(key, val, predicate, predicate_satisfied) || *predicate_satisfied) {
       for (InnerNode *node : locked_nodes) {
         node->base_latch_.Unlock();
       }
-//      std::cout << "End size: " << leaf->size_ << std::endl;
+      //      std::cout << "End size: " << leaf->size_ << std::endl;
       return !(*predicate_satisfied);
     }
-//    std::cout << "End size: " << leaf->size_ << std::endl;
+    //    std::cout << "End size: " << leaf->size_ << std::endl;
 
     // Otherwise must split so create new leaf after sorting current leaf
     //    leaf->sort_leaf();
@@ -339,7 +300,8 @@ class BPlusTree {
     InnerNode *old_node = nullptr, *new_node = nullptr;
     BaseNode *new_child = static_cast<BaseNode *>(new_leaf);
 
-    for (uint64_t i = locked_nodes.size() - 1; i < locked_nodes.size() && locked_nodes[i]->size_ == locked_nodes[i]->limit_; i--) {
+    for (uint64_t i = locked_nodes.size() - 1;
+         i < locked_nodes.size() && locked_nodes[i]->size_ == locked_nodes[i]->limit_; i--) {
       old_node = locked_nodes[i];
       uint16_t child_index = traversal_indices[i];
       structure_size_ += sizeof(InnerNode);
@@ -388,7 +350,7 @@ class BPlusTree {
     return true;
   }
 
-  void ScanKey(KeyType key, std::vector<ValueType> &values) {
+  void ScanKey(KeyType key, const std::vector<ValueType> &values) {
     InnerNode *parent;
     BaseNode *n = this->root_;
     while (n->get_type() != NodeType::LEAF) {
@@ -402,8 +364,8 @@ class BPlusTree {
     auto leaf = static_cast<LeafNode *>(n);
     LeafNode *sibling;
     leaf->base_latch_.LockShared();
-    while(true) {
-      if(!leaf->scan_range(key, key, &values)) {
+    while (true) {
+      if (!leaf->scan_range(key, key, &values)) {
         leaf->base_latch_.Unlock();
         break;
       }
@@ -419,13 +381,7 @@ class BPlusTree {
   }
 
   std::atomic<BaseNode *> root_;
-  common::SharedLatch root_latch_;
   std::atomic<uint64_t> structure_size_;
-
-  // TODO: Check if bool or bool (*) is correct type of predicate
-  LeafNode *FindMin(KeyType key) {}
-  LeafNode *FindMax(KeyType key) {}
-  void FindRange(KeyType min_key, KeyType max_key, bool is_increasing, std::vector<ValueType> *results);
 };
 
 }  // namespace terrier::storage::index
