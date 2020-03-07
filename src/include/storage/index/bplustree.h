@@ -195,7 +195,7 @@ class BPlusTree {
     }
 
     bool scan_range(KeyType low, KeyType hi, std::vector<ValueType> *values) {
-      common::SharedLatch::ScopedSharedLatch l(&this->base_latch_);
+      // common::SharedLatch::ScopedSharedLatch l(&this->base_latch_);
       bool res = true;
       for (uint16_t i = 0; i < this->size_; i++) {
         if (KeyCmpGreaterEqual(keys_[i], low) && KeyCmpLessEqual(keys_[i], hi))
@@ -327,8 +327,16 @@ class BPlusTree {
       parent->base_latch_.Unlock();
     }
     auto leaf = static_cast<LeafNode *>(n);
-    while(leaf != NULL && leaf->scan_range(key, key, &values)) {
+    LeafNode *sibling;
+    leaf->base_latch_.LockShared();
+    while(true) {
+      if(!(leaf != nullptr && leaf->scan_range(key, key, &values))) {
+        break;
+      }
+      sibling = leaf;
       leaf = leaf->right_;
+      leaf->base_latch_.LockShared();
+      sibling->base_latch_.Unlock();
     }
   }
 
