@@ -153,7 +153,7 @@ class BPlusTree {
    public:
     static const uint64_t delete_mask_size_ = 64;
 
-    LeafNode(BPlusTree *tree) : BaseNode(tree, NodeType::LEAF), left_(nullptr), right_(nullptr){};
+    LeafNode(BPlusTree *tree) : BaseNode(tree, NodeType::LEAF), left_(nullptr), right_(nullptr) {};
     ~LeafNode() = default;
 
     bool insert(KeyType key, ValueType value, std::function<bool(const ValueType)> predicate,
@@ -235,7 +235,7 @@ class BPlusTree {
     //    }
 
     bool scan_range(KeyType low, KeyType hi, std::vector<ValueType> *values) {
-      common::SharedLatch::ScopedSharedLatch l(&this->base_latch_);
+      // common::SharedLatch::ScopedSharedLatch l(&this->base_latch_);
       bool res = true;
       for (uint16_t i = 0; i < this->size_; i++) {
         if (this->tree_->KeyCmpGreaterEqual(keys_[i], low) && this->tree_->KeyCmpLessEqual(keys_[i], hi))
@@ -247,14 +247,15 @@ class BPlusTree {
     }
 
     std::atomic<LeafNode *> left_, right_;
-    KeyType keys_[leaf_size_];
-    ValueType values_[leaf_size_];
+    KeyType keys_[leaf_size_] = {};
+    ValueType values_[leaf_size_] = {};
   };
 
   bool Insert(std::function<bool(const ValueType)> predicate, KeyType key, ValueType val, bool *predicate_satisfied) {
     std::vector<InnerNode *> locked_nodes;
     std::vector<uint16_t> traversal_indices;
     BaseNode *n = this->root_;
+    printf("insert called\n");
 
     // Find minimum leaf that stores would store key, taking locks as we go down tree
     while (n->get_type() != NodeType::LEAF) {
@@ -391,13 +392,27 @@ class BPlusTree {
     while (n->get_type() != NodeType::LEAF) {
       auto *inner_n = static_cast<InnerNode *>(n);
       inner_n->base_latch_.LockShared();
-      parent = n;
-      n = inner_n->findMinChild(key);
+      parent = static_cast<InnerNode *>(n);
+      uint16_t n_index = inner_n->findMinChild(key);
+      n = inner_n->children_[n_index];
       parent->base_latch_.Unlock();
     }
     auto leaf = static_cast<LeafNode *>(n);
-    while(leaf != NULL && leaf->scan_range(key, key, &values)) {
+    LeafNode *sibling;
+    leaf->base_latch_.LockShared();
+    while(true) {
+      if(!leaf->scan_range(key, key, &values)) {
+        leaf->base_latch_.Unlock();
+        break;
+      }
+      sibling = leaf;
       leaf = leaf->right_;
+      if (leaf == nullptr) {
+        sibling->base_latch_.Unlock();
+        break;
+      }
+      leaf->base_latch_.LockShared();
+      sibling->base_latch_.Unlock();
     }
   }
 
