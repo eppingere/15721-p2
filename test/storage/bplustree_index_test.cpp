@@ -276,7 +276,9 @@ TEST_F(BPlusTreeIndexTests, UniqueKey1) {
   *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
   unique_index_->ScanKey(*txn0, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  EXPECT_EQ(tuple_slot, results[0]);
+  if (results.size() > 0) {
+    EXPECT_EQ(tuple_slot, results[0]);
+  }
   results.clear();
 
   auto *txn1 = txn_manager_->BeginTransaction();
@@ -306,7 +308,9 @@ TEST_F(BPlusTreeIndexTests, UniqueKey1) {
   // txn 2 scans index and gets a visible, correct result
   unique_index_->ScanKey(*txn2, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  EXPECT_EQ(tuple_slot, results[0]);
+  if (results.size() > 0) {
+    EXPECT_EQ(tuple_slot, results[0]);
+  }
   results.clear();
 
   txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
@@ -337,7 +341,9 @@ TEST_F(BPlusTreeIndexTests, UniqueKey2) {
   *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
   unique_index_->ScanKey(*txn0, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  EXPECT_EQ(tuple_slot, results[0]);
+  if (results.size() > 0) {
+    EXPECT_EQ(tuple_slot, results[0]);
+  }
   results.clear();
 
   txn_manager_->Commit(txn0, transaction::TransactionUtil::EmptyCallback, nullptr);
@@ -362,7 +368,9 @@ TEST_F(BPlusTreeIndexTests, UniqueKey2) {
   // txn 2 scans index and gets a visible, correct result
   unique_index_->ScanKey(*txn2, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  EXPECT_EQ(tuple_slot, results[0]);
+  if (results.size() > 0) {
+    EXPECT_EQ(tuple_slot, results[0]);
+  }
   results.clear();
 
   txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
@@ -393,7 +401,9 @@ TEST_F(BPlusTreeIndexTests, UniqueKey3) {
   *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
   unique_index_->ScanKey(*txn0, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  EXPECT_EQ(tuple_slot, results[0]);
+  if (results.size() > 0) {
+    EXPECT_EQ(tuple_slot, results[0]);
+  }
   results.clear();
 
   // txn 0 inserts into table
@@ -462,7 +472,9 @@ TEST_F(BPlusTreeIndexTests, CommitInsert1) {
   *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
   default_index_->ScanKey(*txn0, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  EXPECT_EQ(tuple_slot, results[0]);
+  if (results.size() > 0) {
+    EXPECT_EQ(tuple_slot, results[0]);
+  }
   results.clear();
 
   auto *txn1 = txn_manager_->BeginTransaction();
@@ -486,7 +498,9 @@ TEST_F(BPlusTreeIndexTests, CommitInsert1) {
   // txn 2 scans index and gets a visible, correct result
   default_index_->ScanKey(*txn2, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  EXPECT_EQ(tuple_slot, results[0]);
+  if (results.size() > 0) {
+    EXPECT_EQ(tuple_slot, results[0]);
+  }
   results.clear();
 
   txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
@@ -541,7 +555,9 @@ TEST_F(BPlusTreeIndexTests, CommitInsert2) {
   // txn 1 scans index and gets a visible, correct result
   default_index_->ScanKey(*txn1, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  EXPECT_EQ(tuple_slot, results[0]);
+  if (results.size() > 0) {
+    EXPECT_EQ(tuple_slot, results[0]);
+  }
   results.clear();
 
   txn_manager_->Commit(txn1, transaction::TransactionUtil::EmptyCallback, nullptr);
@@ -558,7 +574,9 @@ TEST_F(BPlusTreeIndexTests, CommitInsert2) {
   // txn 2 scans index and gets a visible, correct result
   default_index_->ScanKey(*txn2, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  EXPECT_EQ(tuple_slot, results[0]);
+  if (results.size() > 0) {
+    EXPECT_EQ(tuple_slot, results[0]);
+  }
   results.clear();
 
   txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
