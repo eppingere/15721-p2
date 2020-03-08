@@ -298,6 +298,90 @@ class BPlusTree {
     ValueType values_[LEAF_SIZE] = {};
   };
 
+  class BPlusTreeIterator {
+   public:
+    BPlusTreeIterator(LeafNode *leaf, uint16_t index, bool at_end = false, bool at_rend = false)
+        : leaf_(leaf), index_(index), at_end_(at_end), at_rend_(at_rend), is_end_(false), is_begin_(false) {}
+    // isEnd_or_NotIsBegin is true if is end and false if is begin
+    BPlusTreeIterator(bool isEnd_or_NotIsBegin)
+        : leaf_(nullptr),
+          index_(0),
+          at_end_(false),
+          at_rend_(false),
+          is_end_(isEnd_or_NotIsBegin),
+          is_begin_(!isEnd_or_NotIsBegin) {}
+
+    BPlusTreeIterator &operator++() {
+      //TODO(emmanuee) fix this because it sucks (wraparound)
+      index_++;
+      if (index_ >= leaf_->size_) {
+        if (leaf_->right_ == nullptr) {
+          at_end_ = true;
+        } else {
+          LeafNode *next_leaf = leaf_->right_;
+          next_leaf->base_latch_.LockShared();
+          leaf_->base_latch_.Unlock();
+          leaf_ = next_leaf;
+          index_ = 0;
+        }
+      }
+      return *this;
+    }
+
+    BPlusTreeIterator &operator++(int) {
+      BPlusTreeIterator tmp = *this;
+      this ++;
+      return tmp;
+    }
+
+    BPlusTreeIterator operator--() {
+      //TODO(emmanuee) fix this because it sucks (wraparound)
+      index_--;
+      if (index_ > leaf_->size_) {
+        if (leaf_->left_ == nullptr) {
+          at_rend_ = true;
+        } else {
+          LeafNode *next_leaf = leaf_->left_;
+          next_leaf->base_latch_.LockShared();
+          leaf_->base_latch_.Unlock();
+          leaf_ = next_leaf;
+          index_ = next_leaf->size_ - 1;
+        }
+      }
+      return *this;
+    }
+
+    BPlusTreeIterator &operator--(int) {
+      BPlusTreeIterator tmp = *this;
+      this --;
+      return tmp;
+    }
+
+    bool operator==(BPlusTreeIterator other) {
+      if (LIKELY(other.is_end_)) {
+        return at_end_;
+      }
+      if (LIKELY(is_end_)) {
+        return other.at_end_;
+      }
+      return leaf_ == other.leaf_ && index_ == other.index_;
+    }
+
+    bool operator!=(BPlusTreeIterator other) { return !operator==(other); }
+
+    bool operator==(bool end) { return at_end_; }
+    bool operator!=(bool end) { return !operator==(end); }
+    bool operator==(char rend) { return at_rend_; }
+    bool operator!=(char rend) { return !operator==(rend); }
+
+    KeyType GetKey() { return leaf_->keys_[index_]; }
+    ValueType GetValue() { return leaf_->values_[index_]; }
+
+    LeafNode *leaf_;
+    uint16_t index_;
+    bool at_end_, at_rend_, is_end_, is_begin_;
+  };
+
   bool Insert(std::function<bool(const ValueType)> predicate, KeyType key, ValueType val, bool *predicate_satisfied) {
     std::vector<InnerNode *> locked_nodes;
     std::vector<uint16_t> traversal_indices;
@@ -449,18 +533,28 @@ class BPlusTree {
 
   void ScanKey(KeyType key, std::vector<ValueType> *values) {
     InnerNode *parent;
+    tree_latch_.LockShared();
     BaseNode *n = this->root_;
+    bool root_lock_held = true;
+    n->base_latch_.LockShared();
     while (n->GetType() != NodeType::LEAF) {
       auto *inner_n = static_cast<InnerNode *>(n);
-      inner_n->base_latch_.LockShared();
+      if (UNLIKELY(root_lock_held)) {
+        tree_latch_.Unlock();
+        root_lock_held = false;
+      }
       parent = static_cast<InnerNode *>(n);
       uint16_t n_index = inner_n->FindMinChild(key);
       n = inner_n->children_[n_index];
+      n->base_latch_.LockShared();
       parent->base_latch_.Unlock();
+    }
+    if (UNLIKELY(root_lock_held)) {
+      tree_latch_.Unlock();
+      root_lock_held = false;
     }
     auto leaf = static_cast<LeafNode *>(n);
     LeafNode *sibling;
-    leaf->base_latch_.LockShared();
     while (true) {
       if (!leaf->ScanRange(key, key, values)) {
         leaf->base_latch_.Unlock();
@@ -477,10 +571,117 @@ class BPlusTree {
     }
   }
 
+  BPlusTreeIterator Begin() {
+    InnerNode *parent;
+    tree_latch_.LockShared();
+    BaseNode *n = this->root_;
+    n->base_latch_.LockShared();
+    tree_latch_.LockShared();
+
+    while (n->GetType() != NodeType::LEAF) {
+      auto *inner_n = static_cast<InnerNode *>(n);
+      parent = static_cast<InnerNode *>(n);
+      n = inner_n->children_[0];
+      TERRIER_ASSERT(n != nullptr, "child of inner node should be non-null");
+      n->base_latch_.LockShared();
+      parent->base_latch_.Unlock();
+    }
+
+    auto leaf = static_cast<LeafNode *>(n);
+    return {leaf, 0};
+  }
+
+  BPlusTreeIterator Begin(KeyType key) {
+    InnerNode *parent;
+    tree_latch_.LockShared();
+    BaseNode *n = this->root_;
+    n->base_latch_.LockShared();
+    tree_latch_.LockShared();
+
+    while (n->GetType() != NodeType::LEAF) {
+      auto *inner_n = static_cast<InnerNode *>(n);
+      parent = static_cast<InnerNode *>(n);
+      n = inner_n->children_[inner_n->FindMinChild(key)];
+      TERRIER_ASSERT(n != nullptr, "child of inner node should be non-null");
+      n->base_latch_.LockShared();
+      parent->base_latch_.Unlock();
+    }
+    auto leaf = static_cast<LeafNode *>(n);
+    uint16_t i;
+    for (i = 0; i < leaf->size_ && KeyCmpGreater(key, leaf->keys_[i]); i++) {
+    }
+    if (i == leaf->size_) {
+      LeafNode *next_leaf = leaf->right_;
+      if (next_leaf == nullptr) {
+        leaf->base_latch_.Unlock();
+        return {leaf, static_cast<uint16_t>(i - 1), true, false};
+      }
+      next_leaf->base_latch_.LockShared();
+      leaf->base_latch_.Unlock();
+      return {next_leaf, 0};
+    }
+    return {leaf, i};
+  }
+
+  BPlusTreeIterator RBegin() {
+    InnerNode *parent;
+    tree_latch_.LockShared();
+    BaseNode *n = this->root_;
+    n->base_latch_.LockShared();
+    tree_latch_.Unlock();
+    while (n->GetType() != NodeType::LEAF) {
+      auto *inner_n = static_cast<InnerNode *>(n);
+      parent = static_cast<InnerNode *>(n);
+      n = inner_n->children_[inner_n->size_];
+      TERRIER_ASSERT(n != nullptr, "child of inner node should be non-null");
+      n->base_latch_.LockShared();
+      parent->base_latch_.Unlock();
+    }
+    auto leaf = static_cast<LeafNode *>(n);
+    return {leaf, leaf->size_ - 1};
+  }
+
+  BPlusTreeIterator RBegin(KeyType key) {
+    InnerNode *parent;
+    tree_latch_.LockShared();
+    BaseNode *n = this->root_;
+    n->base_latch_.LockShared();
+    tree_latch_.Unlock();
+
+    while (n->GetType() != NodeType::LEAF) {
+      auto *inner_n = static_cast<InnerNode *>(n);
+      parent = static_cast<InnerNode *>(n);
+      n = inner_n->FindMaxChild(key);
+      TERRIER_ASSERT(n != nullptr, "child of inner node should be non-null");
+      n->base_latch_.LockShared();
+      parent->base_latch_.Unlock();
+    }
+    auto leaf = static_cast<LeafNode *>(n);
+    uint16_t i;
+    for (i = leaf->size_ - 1; i < leaf->size_ && KeyCmpLess(key, leaf->keys_[i]); i--) {
+    }
+    if (i > leaf->size_) {
+      LeafNode *next_leaf = leaf->left_;
+      if (next_leaf == nullptr) {
+        leaf->base_latch_.Unlock();
+        return {leaf, 0, false, true};
+      }
+      next_leaf->base_latch_.LockShared();
+      leaf->base_latch_.Unlock();
+      return {next_leaf, static_cast<uint16_t>(next_leaf->size_ - 1)};
+    }
+    return {leaf, i};
+  }
+  BPlusTreeIterator End() { return END; }
+  BPlusTreeIterator REnd() { return REND; }
+  bool FastEnd() { return true; }
+  char FastREnd() { return 0x0; }
+
   std::atomic<BaseNode *> root_;
   std::atomic<uint64_t> structure_size_;
-
   common::SharedLatch tree_latch_;
+  const BPlusTreeIterator END = {true};
+  const BPlusTreeIterator REND = {false};
 };
 
 }  // namespace terrier::storage::index
