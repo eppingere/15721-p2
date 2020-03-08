@@ -205,18 +205,24 @@ class BPlusTree {
     bool ScanPredicate(KeyType key, std::function<bool(const ValueType)> predicate) {
       LeafNode *current_leaf = this;
       bool no_bigger_keys = true;
+      current_leaf->base_latch_.LockShared();
       while (current_leaf != nullptr && no_bigger_keys) {
-        common::SharedLatch::ScopedSharedLatch l(&current_leaf->base_latch_);
+//        common::SharedLatch::ScopedSharedLatch l(&current_leaf->base_latch_);
         for (uint16_t i = 0; i < current_leaf->size_; i++) {
           if (current_leaf->tree_->KeyCmpEqual(key, current_leaf->keys_[i]) && predicate(current_leaf->values_[i])) {
+            current_leaf->base_latch_.Unlock();
             return true;
           }
           if (current_leaf->tree_->KeyCmpLess(key, current_leaf->keys_[i])) {
             no_bigger_keys = false;
           }
         }
+        LeafNode *sibling = current_leaf;
         current_leaf = current_leaf->right_;
+        if (LIKELY(current_leaf != nullptr)) current_leaf->base_latch_.LockShared();
+        sibling->base_latch_.Unlock();
       }
+      if (current_leaf != nullptr) current_leaf->base_latch_.Unlock();
       return false;
     }
 
@@ -382,7 +388,44 @@ class BPlusTree {
     bool at_end_, at_rend_, is_end_, is_begin_;
   };
 
+  inline bool OptimisticInsert(std::function<bool(const ValueType)> predicate, KeyType key, ValueType val, bool *predicate_satisfied) {
+    BaseNode *n;
+    LeafNode *leaf;
+    tree_latch_.LockShared();
+    n = root_;
+    if (n->GetType() == NodeType::LEAF) {
+      n->base_latch_.LockExclusive();
+    } else {
+      n->base_latch_.LockShared();
+    }
+    tree_latch_.Unlock();
+
+    while (n->GetType() != NodeType::LEAF) {
+      InnerNode *inner_n = static_cast<InnerNode *>(n);
+      uint16_t child_index = inner_n->FindMinChild(key);
+      n = inner_n->children_[child_index];
+
+      if (n->GetType() == NodeType::LEAF) {
+        n->base_latch_.LockExclusive();
+        inner_n->base_latch_.Unlock();
+        break;
+      }
+
+      n->base_latch_.LockShared();
+      inner_n->base_latch_.Unlock();
+    }
+
+    leaf = static_cast<LeafNode *>(n);
+    bool result = leaf->InsertLeaf(key, val, predicate, predicate_satisfied);
+    leaf->base_latch_.Unlock();
+    return result;
+  }
+
   bool Insert(std::function<bool(const ValueType)> predicate, KeyType key, ValueType val, bool *predicate_satisfied) {
+    if (OptimisticInsert(predicate, key, val, predicate_satisfied)) {
+      return true;
+    }
+
     std::vector<InnerNode *> locked_nodes;
     std::vector<uint16_t> traversal_indices;
 
@@ -535,23 +578,15 @@ class BPlusTree {
     InnerNode *parent;
     tree_latch_.LockShared();
     BaseNode *n = this->root_;
-    bool root_lock_held = true;
     n->base_latch_.LockShared();
+    tree_latch_.Unlock();
     while (n->GetType() != NodeType::LEAF) {
       auto *inner_n = static_cast<InnerNode *>(n);
-      if (UNLIKELY(root_lock_held)) {
-        tree_latch_.Unlock();
-        root_lock_held = false;
-      }
       parent = static_cast<InnerNode *>(n);
       uint16_t n_index = inner_n->FindMinChild(key);
       n = inner_n->children_[n_index];
       n->base_latch_.LockShared();
       parent->base_latch_.Unlock();
-    }
-    if (UNLIKELY(root_lock_held)) {
-      tree_latch_.Unlock();
-      root_lock_held = false;
     }
     auto leaf = static_cast<LeafNode *>(n);
     LeafNode *sibling;
