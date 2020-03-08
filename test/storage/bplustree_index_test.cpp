@@ -1,5 +1,6 @@
 #include <cstring>
 #include <functional>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
@@ -34,7 +35,8 @@ class BPlusTreeIndexTests : public TerrierTest {
 
  public:
   std::default_random_engine generator_;
-  const uint32_t num_threads_ = 4;
+  const uint32_t num_threads_ = 12;
+  const uint32_t num_inserts_ = 10000000;  // number of tuples/primary keys for each worker to attempt to insert
 
   std::unique_ptr<DBMain> db_main_;
   common::ManagedPointer<transaction::TransactionManager> txn_manager_;
@@ -105,13 +107,12 @@ class BPlusTreeIndexTests : public TerrierTest {
 };
 
 /**
- * This test creates multiple worker threads that all try to insert [0,num_inserts) as tuples in the table and into the
+ * This test creates multiple worker threads that all try to insert [0,num_inserts_) as tuples in the table and into the
  * primary key index. At completion of the workload, only num_inserts_ txns should have committed with visible versions
  * in the index and table.
  */
 // NOLINTNEXTLINE
 TEST_F(BPlusTreeIndexTests, UniqueInsert) {
-  const uint32_t num_inserts = 100000;  // number of tuples/primary keys for each worker to attempt to insert
   auto workload = [&](uint32_t worker_id) {
     auto *const key_buffer =
         common::AllocationUtil::AllocateAligned(unique_index_->GetProjectedRowInitializer().ProjectedRowSize());
@@ -120,7 +121,7 @@ TEST_F(BPlusTreeIndexTests, UniqueInsert) {
     // some threads count up, others count down. This is to mix whether threads abort for write-write conflict or
     // previously committed versions
     if (worker_id % 2 == 0) {
-      for (uint32_t i = 0; i < num_inserts; i++) {
+      for (uint32_t i = 0; i < num_inserts_; i++) {
         auto *const insert_txn = txn_manager_->BeginTransaction();
         auto *const insert_redo =
             insert_txn->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
@@ -137,7 +138,7 @@ TEST_F(BPlusTreeIndexTests, UniqueInsert) {
       }
 
     } else {
-      for (uint32_t i = num_inserts - 1; i < num_inserts; i--) {
+      for (uint32_t i = num_inserts_ - 1; i < num_inserts_; i--) {
         auto *const insert_txn = txn_manager_->BeginTransaction();
         auto *const insert_redo =
             insert_txn->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
@@ -169,7 +170,7 @@ TEST_F(BPlusTreeIndexTests, UniqueInsert) {
 
   auto *const scan_key_pr = unique_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
 
-  for (uint32_t i = 0; i < num_inserts; i++) {
+  for (uint32_t i = 0; i < num_inserts_; i++) {
     *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = i;
     unique_index_->ScanKey(*scan_txn, *scan_key_pr, &results);
     EXPECT_EQ(results.size(), 1);
@@ -182,13 +183,12 @@ TEST_F(BPlusTreeIndexTests, UniqueInsert) {
 }
 
 /**
- * This test creates multiple worker threads that all try to insert [0,num_inserts) as tuples in the table and into the
+ * This test creates multiple worker threads that all try to insert [0,num_inserts_) as tuples in the table and into the
  * primary key index. At completion of the workload, all num_inserts_ txns * num_threads_ should have committed with
  * visible versions in the index and table.
  */
 // NOLINTNEXTLINE
 TEST_F(BPlusTreeIndexTests, DefaultInsert) {
-  const uint32_t num_inserts = 100000;  // number of tuples/primary keys for each worker to attempt to insert
   auto workload = [&](uint32_t worker_id) {
     auto *const key_buffer =
         common::AllocationUtil::AllocateAligned(default_index_->GetProjectedRowInitializer().ProjectedRowSize());
@@ -196,7 +196,7 @@ TEST_F(BPlusTreeIndexTests, DefaultInsert) {
 
     // some threads count up, others count down. Threads shouldn't abort each other
     if (worker_id % 2 == 0) {
-      for (uint32_t i = 0; i < num_inserts; i++) {
+      for (uint32_t i = 0; i < num_inserts_; i++) {
         auto *const insert_txn = txn_manager_->BeginTransaction();
         auto *const insert_redo =
             insert_txn->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
@@ -209,7 +209,7 @@ TEST_F(BPlusTreeIndexTests, DefaultInsert) {
         txn_manager_->Commit(insert_txn, transaction::TransactionUtil::EmptyCallback, nullptr);
       }
     } else {
-      for (uint32_t i = num_inserts - 1; i < num_inserts; i--) {
+      for (uint32_t i = num_inserts_ - 1; i < num_inserts_; i--) {
         auto *const insert_txn = txn_manager_->BeginTransaction();
         auto *const insert_redo =
             insert_txn->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
@@ -239,7 +239,7 @@ TEST_F(BPlusTreeIndexTests, DefaultInsert) {
 
   auto *const scan_key_pr = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
 
-  for (uint32_t i = 0; i < num_inserts; i++) {
+  for (uint32_t i = 0; i < num_inserts_; i++) {
     *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = i;
     default_index_->ScanKey(*scan_txn, *scan_key_pr, &results);
     EXPECT_EQ(results.size(), num_threads_);
@@ -276,9 +276,7 @@ TEST_F(BPlusTreeIndexTests, UniqueKey1) {
   *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
   unique_index_->ScanKey(*txn0, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  if (!results.empty()) {
-    EXPECT_EQ(tuple_slot, results[0]);
-  }
+  EXPECT_EQ(tuple_slot, results[0]);
   results.clear();
 
   auto *txn1 = txn_manager_->BeginTransaction();
@@ -308,9 +306,7 @@ TEST_F(BPlusTreeIndexTests, UniqueKey1) {
   // txn 2 scans index and gets a visible, correct result
   unique_index_->ScanKey(*txn2, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  if (!results.empty()) {
-    EXPECT_EQ(tuple_slot, results[0]);
-  }
+  EXPECT_EQ(tuple_slot, results[0]);
   results.clear();
 
   txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
@@ -341,9 +337,7 @@ TEST_F(BPlusTreeIndexTests, UniqueKey2) {
   *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
   unique_index_->ScanKey(*txn0, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  if (!results.empty()) {
-    EXPECT_EQ(tuple_slot, results[0]);
-  }
+  EXPECT_EQ(tuple_slot, results[0]);
   results.clear();
 
   txn_manager_->Commit(txn0, transaction::TransactionUtil::EmptyCallback, nullptr);
@@ -368,9 +362,7 @@ TEST_F(BPlusTreeIndexTests, UniqueKey2) {
   // txn 2 scans index and gets a visible, correct result
   unique_index_->ScanKey(*txn2, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  if (!results.empty()) {
-    EXPECT_EQ(tuple_slot, results[0]);
-  }
+  EXPECT_EQ(tuple_slot, results[0]);
   results.clear();
 
   txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
@@ -401,9 +393,7 @@ TEST_F(BPlusTreeIndexTests, UniqueKey3) {
   *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
   unique_index_->ScanKey(*txn0, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  if (!results.empty()) {
-    EXPECT_EQ(tuple_slot, results[0]);
-  }
+  EXPECT_EQ(tuple_slot, results[0]);
   results.clear();
 
   // txn 0 inserts into table
@@ -472,9 +462,7 @@ TEST_F(BPlusTreeIndexTests, CommitInsert1) {
   *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
   default_index_->ScanKey(*txn0, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  if (!results.empty()) {
-    EXPECT_EQ(tuple_slot, results[0]);
-  }
+  EXPECT_EQ(tuple_slot, results[0]);
   results.clear();
 
   auto *txn1 = txn_manager_->BeginTransaction();
@@ -498,9 +486,7 @@ TEST_F(BPlusTreeIndexTests, CommitInsert1) {
   // txn 2 scans index and gets a visible, correct result
   default_index_->ScanKey(*txn2, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  if (!results.empty()) {
-    EXPECT_EQ(tuple_slot, results[0]);
-  }
+  EXPECT_EQ(tuple_slot, results[0]);
   results.clear();
 
   txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
@@ -555,9 +541,7 @@ TEST_F(BPlusTreeIndexTests, CommitInsert2) {
   // txn 1 scans index and gets a visible, correct result
   default_index_->ScanKey(*txn1, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  if (!results.empty()) {
-    EXPECT_EQ(tuple_slot, results[0]);
-  }
+  EXPECT_EQ(tuple_slot, results[0]);
   results.clear();
 
   txn_manager_->Commit(txn1, transaction::TransactionUtil::EmptyCallback, nullptr);
@@ -574,9 +558,7 @@ TEST_F(BPlusTreeIndexTests, CommitInsert2) {
   // txn 2 scans index and gets a visible, correct result
   default_index_->ScanKey(*txn2, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  if (!results.empty()) {
-    EXPECT_EQ(tuple_slot, results[0]);
-  }
+  EXPECT_EQ(tuple_slot, results[0]);
   results.clear();
 
   txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);

@@ -58,6 +58,13 @@ template <typename KeyType, typename ValueType, typename KeyComparator = std::le
           typename ValueEqualityChecker = std::equal_to<ValueType>>
 class BPlusTree {
  public:
+  /*
+   * Constructor - Set up initial environment for BwTree
+   *
+   * Any tree instance will start with an empty leaf node as the root, which will then be filled.
+   *
+   * Some properties of the tree should be specified in the argument.
+   */
   explicit BPlusTree(KeyComparator p_key_cmp_obj = KeyComparator{},
                      KeyEqualityChecker p_key_eq_obj = KeyEqualityChecker{}, KeyHashFunc p_key_hash_obj = KeyHashFunc{},
                      ValueEqualityChecker p_value_eq_obj = ValueEqualityChecker{})
@@ -69,6 +76,7 @@ class BPlusTree {
     root_ = static_cast<BaseNode *>(new LeafNode(this));
   }
 
+  // Key comparator, and key and value equality checker
   KeyComparator key_cmp_obj_;
   KeyEqualityChecker key_eq_obj_;
   ValueEqualityChecker value_eq_obj_;
@@ -113,13 +121,16 @@ class BPlusTree {
   bool KeyCmpLessEqual(const KeyType &key1, const KeyType &key2) const { return !KeyCmpGreater(key1, key2); }
 
   std::atomic<uint64_t> epoch_;
-  static const uint16_t BRANCH_FACTOR = 8;
-  static const uint16_t LEAF_SIZE = 8;  // cannot ever be less than 3
+
+  // Tunable parameters
+  static const uint16_t BRANCH_FACTOR = 20;
+  static const uint16_t LEAF_SIZE = 20;  // cannot ever be less than 3
   static const uint64_t WRITE_LOCK_MASK = static_cast<uint64_t>(0x01) << 63;
   static const uint64_t NODE_TYPE_MASK = static_cast<uint64_t>(0x01) << 62;
   static const uint64_t IS_DELETED_MASK = static_cast<uint64_t>(0x01) << 61;
   static const uint64_t DELETE_EPOCH_MASK = ~(static_cast<uint64_t>(0xE) << 60);
 
+  // Node types
   enum class NodeType : bool {
     LEAF = true,
     INNER_NODE = false,
@@ -272,7 +283,6 @@ class BPlusTree {
     }
 
     bool ScanRange(KeyType low, KeyType hi, std::vector<ValueType> *values) {
-      // common::SharedLatch::ScopedSharedLatch l(&this->base_latch_);
       bool res = true;
       for (uint16_t i = 0; i < this->size_; i++) {
         if (this->tree_->KeyCmpGreaterEqual(keys_[i], low) && this->tree_->KeyCmpLessEqual(keys_[i], hi))
@@ -289,17 +299,22 @@ class BPlusTree {
   };
 
   bool Insert(std::function<bool(const ValueType)> predicate, KeyType key, ValueType val, bool *predicate_satisfied) {
-    common::SpinLatch::ScopedSpinLatch latch(&global_latch_);
     std::vector<InnerNode *> locked_nodes;
     std::vector<uint16_t> traversal_indices;
+
+    tree_latch_.LockExclusive();
+    bool holds_tree_latch = true;
     BaseNode *n = this->root_;
-    //    std::cout << "insert called" << std::endl;
 
     // Find minimum leaf that stores would store key, taking locks as we go down tree
     while (n->GetType() != NodeType::LEAF) {
       auto inner_n = static_cast<InnerNode *>(n);
-      inner_n->base_latch_.LockExclusive();
+      n->base_latch_.LockExclusive();
       if (n->size_ < n->limit_) {
+        if (holds_tree_latch) {
+          tree_latch_.Unlock();
+          holds_tree_latch = false;
+        }
         for (InnerNode *node : locked_nodes) {
           node->base_latch_.Unlock();
         }
@@ -315,18 +330,18 @@ class BPlusTree {
     // If leaf is not full, insert, unlock all parent nodes and return
     auto leaf = static_cast<LeafNode *>(n);
     common::SharedLatch::ScopedExclusiveLatch l(&leaf->base_latch_);
-    //    std::cout << "Initial size: " << leaf->size_ << std::endl;
     if (leaf->InsertLeaf(key, val, predicate, predicate_satisfied) || *predicate_satisfied) {
+      if (holds_tree_latch) {
+        tree_latch_.Unlock();
+        holds_tree_latch = false;
+      }
       for (InnerNode *node : locked_nodes) {
         node->base_latch_.Unlock();
       }
-      //      std::cout << "End size: " << leaf->size_ << std::endl;
       return !(*predicate_satisfied);
     }
-    //    std::cout << "End size: " << leaf->size_ << std::endl;
 
-    // Otherwise must split so create new leaf after sorting current leaf
-    //    leaf->sort_leaf();
+    // Otherwise must split so create new leaf
     structure_size_ += sizeof(LeafNode);
     auto new_leaf = new LeafNode(this);
 
@@ -341,14 +356,14 @@ class BPlusTree {
     new_leaf->size_ = leaf->size_ - keep_in_leaf;
     leaf->size_ = keep_in_leaf;
 
+    bool result;
     // Insert given key and value into appropriate leaf
     if (KeyCmpLessEqual(key, new_leaf->keys_[0])) {
-      leaf->InsertLeaf(key, val, predicate, predicate_satisfied);
-      //      leaf->sort_leaf();
+      result = leaf->InsertLeaf(key, val, predicate, predicate_satisfied);
     } else {
-      new_leaf->InsertLeaf(key, val, predicate, predicate_satisfied);
-      //      new_leaf->sort_leaf();
+      result = new_leaf->InsertLeaf(key, val, predicate, predicate_satisfied);
     }
+    TERRIER_ASSERT(result, "insert should succede on split leaf");
 
     // Update neighbor pointers for leaf nodes
     new_leaf->left_ = leaf;
@@ -363,7 +378,8 @@ class BPlusTree {
 
     // If split is on root (leaf)
     if (UNLIKELY(locked_nodes.empty())) {
-      TERRIER_ASSERT(leaf == root_, "somehow we had to split a leaf without having to modify the parent");
+      TERRIER_ASSERT(leaf == root_ && holds_tree_latch,
+                     "somehow we had to split a leaf without having to modify the parent");
       // Create new root and update attributes for new root and tree
       structure_size_ += sizeof(InnerNode);
       auto new_root = new InnerNode(this);
@@ -372,6 +388,7 @@ class BPlusTree {
       new_root->children_[1] = new_leaf;
       new_root->size_ = 1;
       root_ = new_root;
+      tree_latch_.Unlock();
       return true;
     }
 
@@ -408,6 +425,7 @@ class BPlusTree {
 
     // Root is being split so must create new root node
     if (old_node == root_) {
+      TERRIER_ASSERT(locked_nodes[0] == root_ && holds_tree_latch, "must hold tree latch to modify root");
       structure_size_ += sizeof(InnerNode);
       auto new_root = new InnerNode(this);
       new_root->keys_[0] = new_key;
@@ -415,6 +433,7 @@ class BPlusTree {
       new_root->children_[1] = new_node;
       new_root->size_ = 1;
       root_ = new_root;
+      tree_latch_.Unlock();
     } else {
       TERRIER_ASSERT(locked_nodes[0]->size_ != locked_nodes[0]->limit_, "top node in split was full but not the root");
 
@@ -429,7 +448,6 @@ class BPlusTree {
   }
 
   void ScanKey(KeyType key, std::vector<ValueType> *values) {
-    common::SpinLatch::ScopedSpinLatch latch(&global_latch_);
     InnerNode *parent;
     BaseNode *n = this->root_;
     while (n->GetType() != NodeType::LEAF) {
@@ -461,7 +479,8 @@ class BPlusTree {
 
   std::atomic<BaseNode *> root_;
   std::atomic<uint64_t> structure_size_;
-  common::SpinLatch global_latch_;
+
+  common::SharedLatch tree_latch_;
 };
 
 }  // namespace terrier::storage::index
