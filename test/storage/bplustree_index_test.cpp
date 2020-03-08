@@ -276,7 +276,7 @@ TEST_F(BPlusTreeIndexTests, UniqueKey1) {
   *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
   unique_index_->ScanKey(*txn0, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  if (results.size() > 0) {
+  if (!results.empty()) {
     EXPECT_EQ(tuple_slot, results[0]);
   }
   results.clear();
@@ -308,7 +308,7 @@ TEST_F(BPlusTreeIndexTests, UniqueKey1) {
   // txn 2 scans index and gets a visible, correct result
   unique_index_->ScanKey(*txn2, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  if (results.size() > 0) {
+  if (!results.empty()) {
     EXPECT_EQ(tuple_slot, results[0]);
   }
   results.clear();
@@ -341,7 +341,7 @@ TEST_F(BPlusTreeIndexTests, UniqueKey2) {
   *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
   unique_index_->ScanKey(*txn0, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  if (results.size() > 0) {
+  if (!results.empty()) {
     EXPECT_EQ(tuple_slot, results[0]);
   }
   results.clear();
@@ -368,7 +368,7 @@ TEST_F(BPlusTreeIndexTests, UniqueKey2) {
   // txn 2 scans index and gets a visible, correct result
   unique_index_->ScanKey(*txn2, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  if (results.size() > 0) {
+  if (!results.empty()) {
     EXPECT_EQ(tuple_slot, results[0]);
   }
   results.clear();
@@ -401,7 +401,7 @@ TEST_F(BPlusTreeIndexTests, UniqueKey3) {
   *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
   unique_index_->ScanKey(*txn0, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  if (results.size() > 0) {
+  if (!results.empty()) {
     EXPECT_EQ(tuple_slot, results[0]);
   }
   results.clear();
@@ -472,7 +472,7 @@ TEST_F(BPlusTreeIndexTests, CommitInsert1) {
   *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
   default_index_->ScanKey(*txn0, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  if (results.size() > 0) {
+  if (!results.empty()) {
     EXPECT_EQ(tuple_slot, results[0]);
   }
   results.clear();
@@ -498,7 +498,7 @@ TEST_F(BPlusTreeIndexTests, CommitInsert1) {
   // txn 2 scans index and gets a visible, correct result
   default_index_->ScanKey(*txn2, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  if (results.size() > 0) {
+  if (!results.empty()) {
     EXPECT_EQ(tuple_slot, results[0]);
   }
   results.clear();
@@ -555,7 +555,7 @@ TEST_F(BPlusTreeIndexTests, CommitInsert2) {
   // txn 1 scans index and gets a visible, correct result
   default_index_->ScanKey(*txn1, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  if (results.size() > 0) {
+  if (!results.empty()) {
     EXPECT_EQ(tuple_slot, results[0]);
   }
   results.clear();
@@ -574,7 +574,7 @@ TEST_F(BPlusTreeIndexTests, CommitInsert2) {
   // txn 2 scans index and gets a visible, correct result
   default_index_->ScanKey(*txn2, *scan_key_pr, &results);
   EXPECT_EQ(results.size(), 1);
-  if (results.size() > 0) {
+  if (!results.empty()) {
     EXPECT_EQ(tuple_slot, results[0]);
   }
   results.clear();

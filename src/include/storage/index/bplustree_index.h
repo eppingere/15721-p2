@@ -88,7 +88,7 @@ class BPlusTreeIndex final : public Index {
 
     // FIXME(15-721 project2): perform a non-unique CONDITIONAL insert into the underlying data structure of the
     // key/value pair
-    const bool UNUSED_ATTRIBUTE result = bplustree_->Insert(predicate, index_key, location, &predicate_satisfied);
+    const bool result = bplustree_->Insert(predicate, index_key, location, &predicate_satisfied);
 
     TERRIER_ASSERT(predicate_satisfied != result, "If predicate is not satisfied then insertion should succeed.");
 
@@ -141,6 +141,8 @@ class BPlusTreeIndex final : public Index {
 
     // Perform lookup in BPlusTree
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
+
+    bplustree_->ScanKey(index_key, &results);
 
     // Avoid resizing our value_list, even if it means over-provisioning
     value_list->reserve(results.size());
