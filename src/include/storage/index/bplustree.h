@@ -611,7 +611,7 @@ class BPlusTree {
     tree_latch_.LockShared();
     BaseNode *n = this->root_;
     n->base_latch_.LockShared();
-    tree_latch_.LockShared();
+    tree_latch_.Unlock();
 
     while (n->GetType() != NodeType::LEAF) {
       auto *inner_n = static_cast<InnerNode *>(n);
@@ -631,7 +631,7 @@ class BPlusTree {
     tree_latch_.LockShared();
     BaseNode *n = this->root_;
     n->base_latch_.LockShared();
-    tree_latch_.LockShared();
+    tree_latch_.Unlock();
 
     while (n->GetType() != NodeType::LEAF) {
       auto *inner_n = static_cast<InnerNode *>(n);
