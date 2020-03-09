@@ -422,9 +422,9 @@ class BPlusTree {
   }
 
   bool Insert(std::function<bool(const ValueType)> predicate, KeyType key, ValueType val, bool *predicate_satisfied) {
-    if (OptimisticInsert(predicate, key, val, predicate_satisfied)) {
-      return true;
-    }
+//    if (OptimisticInsert(predicate, key, val, predicate_satisfied)) {
+//      return true;
+//    }
 
     std::vector<InnerNode *> locked_nodes;
     std::vector<uint16_t> traversal_indices;
