@@ -123,7 +123,9 @@ class BPlusTree {
   // Tunable parameters
   static const uint64_t BITS_IN_UINT64 = 8 * sizeof(uint64_t);
   static const uint16_t BRANCH_FACTOR = 20;
+  static const uint16_t INNER_NODE_OPTIMAL_FILL = BRANCH_FACTOR / 2;
   static const uint16_t LEAF_SIZE = 20;  // cannot ever be less than 3
+  static const uint16_t LEAF_OPTIMAL_FILL = LEAF_SIZE / 2;
   static const uint64_t WRITE_LOCK_MASK = static_cast<uint64_t>(0x01) << 63;
   static const uint64_t NODE_TYPE_MASK = static_cast<uint64_t>(0x01) << 62;
   static const uint64_t IS_DELETED_MASK = static_cast<uint64_t>(0x01) << 61;
@@ -304,8 +306,151 @@ class BPlusTree {
     }
 
     InnerNode* Merge() {
-      BaseNode::ScopedWriteLatch (this);
+      typename BaseNode::ScopedWriteLatch l(this);
+      for (uint16_t i = 0; i < this->size_; i++) {
+        children_[i].load()->GetWriteLatch();
+      }
 
+      InnerNode *new_node;
+      if (children_[0].load()->GetType() == NodeType::LEAF) {
+        new_node = MergeAboveLeaves();
+      } else {
+        new_node = MergeAboveInnerNodes();
+      }
+
+      for (uint16_t i = 0; i < this->size_; i++) {
+        children_[i].load()->MarkDeleted();
+        children_[i].load()->ReleaseWriteLatch();
+      }
+
+      this->MarkDeleted();
+      return new_node;
+    }
+
+    InnerNode *MergeAboveInnerNodes() {
+      std::vector<std::pair<KeyType, BaseNode*>> kvps;
+
+      InnerNode *child = static_cast<InnerNode *>(children_[0]);
+      for (uint16_t j = 0; j < child->size_; j++) {
+        kvps.emplace_back(std::pair<KeyType, BaseNode*>(child->keys_[j], child->children_[j + 1]));
+      }
+
+      for (uint16_t i = 1; i <= this->size_; i++) {
+        child = static_cast<InnerNode *>(children_[i]);
+        kvps.emplace_back(std::pair<KeyType, BaseNode*>(keys_[i - 1], child->children_[0]));
+        for (uint16_t j = 0; j < child->size_; j++) {
+          kvps.emplace_back(std::pair<KeyType, BaseNode*>(child->keys_[j], child->children_[j + 1]));
+        }
+      }
+
+      // we put into each new child the min of (1) ceiling(total pairs + 1 (for additional pointer) / branch factor),
+      // (2) BRANCH_FACTOR / 2
+      uint64_t optimal_leaf_size = (kvps.size() + static_cast<uint64_t>(BRANCH_FACTOR) - 1 + 1) /
+                                   static_cast<uint64_t>(BRANCH_FACTOR);
+      if (optimal_leaf_size < INNER_NODE_OPTIMAL_FILL) {
+        optimal_leaf_size = INNER_NODE_OPTIMAL_FILL;
+      }
+      TERRIER_ASSERT(optimal_leaf_size <= BRANCH_FACTOR,
+                     "we should never have more than LEAF_SIZE many pairs in a leaf");
+      TERRIER_ASSERT(optimal_leaf_size * BRANCH_FACTOR >= kvps.size() + 1,
+                     "we should have at least enough slots to cover all our tuples");
+
+      InnerNode *new_node = new InnerNode(this->tree_);
+      InnerNode *last_child = static_cast<InnerNode *>(children_[0].load())->children_[0];
+
+      uint64_t new_node_index = 0;
+      uint64_t kvps_index = 0;
+      while (kvps_index < kvps.size()) {
+        InnerNode *new_child = new InnerNode(this->tree_);
+        new_child->children_[0] = last_child;
+
+        uint64_t i;
+        for (i = 0; i < optimal_leaf_size && kvps_index + i < kvps.size(); i++) {
+          new_child->keys_[i] = kvps[kvps_index + i].first;
+          new_child->children_[i + 1] = kvps[kvps_index + i].second;
+        }
+
+        new_child->size_ = i;
+        if (kvps_index + i < kvps.size()) {
+          new_node->keys_[new_node_index] = kvps[kvps_index + i];
+          last_child = kvps[kvps_index + i];
+        }
+
+        kvps_index += i;
+        new_node_index++;
+      }
+
+      new_node->size_ = new_node_index;
+      return new_node;
+    }
+
+    InnerNode *MergeAboveLeaves() {
+      std::vector<std::pair<KeyType, ValueType>> kvps;
+      for (uint16_t i = 0; i < this->size_; i++) {
+        auto *leaf = static_cast<LeafNode *>(children_[i]);
+        for (uint16_t j = 0; j < leaf->size_; j++) {
+          if (leaf->IsReadable(j)) {
+            kvps.emplace_back(std::pair<KeyType, ValueType>(leaf->keys_[j], leaf->values_[j]));
+          }
+        }
+      }
+
+      sort(kvps.begin(), kvps.end(), [&] (std::pair<KeyType, ValueType> a, std::pair<KeyType, ValueType> b) {
+        return this->tree_->KeyCmpLess(a.first, b.first);
+      });
+
+      // we put into each new leaf the min of (1) ceiling(total pairs / branch factor), (2) LEAF_SIZE / 2
+      uint16_t optimal_leaf_size = (kvps.size() + static_cast<uint64_t>(BRANCH_FACTOR) - 1) /
+                                   static_cast<uint64_t>(BRANCH_FACTOR);
+      if (optimal_leaf_size < LEAF_OPTIMAL_FILL) {
+        optimal_leaf_size = LEAF_OPTIMAL_FILL;
+      }
+      TERRIER_ASSERT(optimal_leaf_size <= LEAF_SIZE,
+          "we should never have more than LEAF_SIZE many pairs in a leaf");
+      TERRIER_ASSERT(optimal_leaf_size * BRANCH_FACTOR >= kvps.size(),
+          "we should have at least enough slots to cover all our tuples");
+
+      InnerNode *new_node = new InnerNode(this->tree_);
+      LeafNode *new_leaf = new LeafNode(this->tree_);
+      uint16_t i;
+      for (i = 0; i < optimal_leaf_size && i < kvps.size(); i++) {
+        new_leaf->keys_[i] = kvps[i].first;
+        new_leaf->values_[i] = kvps[i].second;
+      }
+      new_leaf->size_ = i;
+      new_node->children_[0] = new_node;
+
+      uint64_t allocated_index = 0;
+      uint64_t inner_node_index = 0;
+      while (allocated_index < kvps.size()) {
+        TERRIER_ASSERT(inner_node_index < BRANCH_FACTOR, "must have at most branch factor many children");
+        new_leaf = new LeafNode(this->tree_);
+        for (i = 0;
+             i < optimal_leaf_size && allocated_index + static_cast<uint64_t>(i) < kvps.size();
+             i++) {
+          new_leaf->keys_[i] = kvps[i + allocated_index].first;
+          new_leaf->values_[i] = kvps[i + allocated_index].second;
+        }
+        new_leaf->size_ = i;
+        new_node->children_[inner_node_index + 1] = new_node;
+        new_node->keys_[inner_node_index] = new_leaf->keys_[0];
+
+        new_leaf->left_ = new_node->children_[inner_node_index];
+        new_node->children_[inner_node_index]->right_ = new_leaf;
+        new_leaf->left_ = new_node->children_[inner_node_index];
+
+        allocated_index += static_cast<uint64_t>(i);
+        inner_node_index++;
+      }
+      new_node->size_ = inner_node_index;
+
+      LeafNode* right = static_cast<LeafNode *>(children_[this->size_])->right;
+      new_node->children_[inner_node_index]->right = right;
+      if (LIKELY(right != nullptr)) {
+        right->left_ = new_node->children_[inner_node_index];
+      }
+
+      return new_node;
     }
 
     std::atomic<BaseNode *> children_[BRANCH_FACTOR];
@@ -719,6 +864,26 @@ class BPlusTree {
   void ScanDescendingLimit(KeyType lo, KeyType hi, uint32_t limit, std::vector<ValueType> *values) {
     for (LeafNode *l = FindMaxLeaf(hi); l != nullptr && values->size() < limit && !l->ScanRange(lo, &hi, values); l = l->left_) {}
     while (values->size() > limit) values->pop_back();
+  }
+
+  void MergeToDepth(InnerNode *node, uint64_t max_depth, uint64_t current_depth) {
+    if (UNLIKELY(node->GetType() == NodeType::LEAF)) {
+      return;
+    }
+
+    if (max_depth - 1 >= current_depth) {
+      typename BaseNode::ScopedWriteLatch l(node);
+      for (uint64_t i = 0; i <= node->size_; i++) {
+        if (UNLIKELY(node->children_[i].load()->GetType() == NodeType::LEAF)) continue;
+        InnerNode* child = static_cast<InnerNode *>(node->children_[i]);
+        node->children_[i] = child->Merge();
+      }
+      return;
+    }
+
+    for (uint16_t i = 0; i <= node->size_; i++) {
+      MergeToDepth(node->children_[i], max_depth, current_depth + 1);
+    }
   }
 
   LeafNode* FindMinLeaf() {
