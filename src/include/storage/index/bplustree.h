@@ -120,9 +120,8 @@ class BPlusTree {
    */
   bool KeyCmpLessEqual(const KeyType &key1, const KeyType &key2) const { return !KeyCmpGreater(key1, key2); }
 
-  std::atomic<uint64_t> epoch_;
-
   // Tunable parameters
+  static const uint64_t BITS_IN_UINT64 = 8 * sizeof(uint64_t);
   static const uint16_t BRANCH_FACTOR = 20;
   static const uint16_t LEAF_SIZE = 20;  // cannot ever be less than 3
   static const uint64_t WRITE_LOCK_MASK = static_cast<uint64_t>(0x01) << 63;
@@ -136,6 +135,87 @@ class BPlusTree {
     INNER_NODE = false,
   };
 
+  template <class T>
+  class NodeAllocator {
+    static const uint64_t ALLOCATOR_ARRAY_SIZE = 64;
+
+    class NodeAllocatorArray {
+      NodeAllocatorArray(std::function<T(BPlusTree)> constructor) : allocated_masks_({}), array_(new T[ALLOCATOR_ARRAY_SIZE]) {
+        for (uint64_t i = 0; i < ALLOCATOR_ARRAY_SIZE; i++) {
+          array_[i] = constructor(this);
+        }
+      }
+
+      bool Allocate(uint64_t i) {
+        while (true) {
+          uint64_t old_value = allocated_masks_[i / BITS_IN_UINT64];
+          uint64_t new_value =
+              allocated_masks_[i / BITS_IN_UINT64] | (static_cast<uint64_t>(0x1) << (i % BITS_IN_UINT64));
+          uint64_t available = old_value >> (i % BITS_IN_UINT64);
+          if (!static_cast<bool>(available & static_cast<uint64_t>(0x1))) return false;
+          if (!allocated_masks_[i / BITS_IN_UINT64].compare_exchange_strong(old_value, new_value)) continue;
+          return true;
+        }
+      }
+
+      bool IsAvailable(uint64_t i) {
+        uint64_t old_value = allocated_masks_[i / BITS_IN_UINT64];
+        return !static_cast<bool>((old_value >> (i % BITS_IN_UINT64)) & static_cast<uint64_t>(0x1));
+      }
+
+      void Reclaim(uint64_t i) {
+        while (true) {
+          uint64_t old_value = allocated_masks_[i / BITS_IN_UINT64];
+          uint64_t new_value =
+              allocated_masks_[i / BITS_IN_UINT64] | (static_cast<uint64_t>(0x1) << (i % BITS_IN_UINT64));
+          if (!allocated_masks_[i / BITS_IN_UINT64].compare_exchange_strong(old_value, new_value)) continue;
+          return;
+        }
+      }
+
+      std::atomic<uint64_t> allocated_masks_[(ALLOCATOR_ARRAY_SIZE + BITS_IN_UINT64 - 1) / BITS_IN_UINT64];
+      T array_[ALLOCATOR_ARRAY_SIZE];
+    };
+
+    NodeAllocator(uint64_t starting_size, std::function<T(BPlusTree)> constructor) : constructor_(constructor),
+    resizing_(false),
+    size_((starting_size + ALLOCATOR_ARRAY_SIZE - 1) / ALLOCATOR_ARRAY_SIZE),
+    table_(new NodeAllocatorArray*[(starting_size + ALLOCATOR_ARRAY_SIZE - 1) / ALLOCATOR_ARRAY_SIZE]) {
+      for (uint64_t i = 0; i < (starting_size + ALLOCATOR_ARRAY_SIZE - 1) / ALLOCATOR_ARRAY_SIZE; i++) {
+        table_[i] = new NodeAllocatorArray(constructor);
+      }
+    }
+
+    T* NewNode() {
+      do {
+        for (uint64_t i = 0; i < size_; i++) {
+          uint64_t j;
+          for (j = 0; j < ALLOCATOR_ARRAY_SIZE && !table_[i]->Allocate(j); j++) {
+          }
+          if (j == ALLOCATOR_ARRAY_SIZE) return table_[i]->array_ + j;
+        }
+      } while (resizing_);
+
+      while (!resizing_.compare_exchange_strong(false, true)) {}
+      NodeAllocatorArray ** new_table = new NodeAllocatorArray*[2 * size_];
+      for (uint64_t i = 0; i < size_; i++) {
+        new_table[i] = table_[i];
+      }
+
+      for (uint64_t i = size_; i < 2 * size_; i++) {
+        new_table[i] = new NodeAllocatorArray(constructor_);
+      }
+
+      table_ = new_table;
+      resizing_ = false;
+    }
+
+    std::function<T(BPlusTree)> constructor_;
+    std::atomic<bool> resizing_;
+    std::atomic<uint64_t> size_;
+    std::atomic<NodeAllocatorArray **> table_;
+  };
+
   class BaseNode {
    public:
     BaseNode(BPlusTree *tree, BPlusTree::NodeType t)
@@ -147,12 +227,39 @@ class BPlusTree {
     ~BaseNode() = default;
 
     BPlusTree *tree_;
-
+    std::atomic<bool> write_latch = false;
+    std::atomic<bool> deleted_ = false;
+    std::atomic<uint64_t> deleted_epoch_ = 0;
     std::atomic<uint64_t> info_;
     std::atomic<uint16_t> size_, offset_, limit_;
-    common::SharedLatch base_latch_;
 
     NodeType GetType() { return static_cast<NodeType>((info_ & NODE_TYPE_MASK) >> 62); }
+
+    void MarkDeleted() {
+      deleted_ = true;
+      deleted_epoch_ = tree_->epoch_;
+    }
+
+    void Reallocate() {
+      write_latch = false;
+      deleted_ = false;
+      deleted_epoch_ = 0;
+      size_ = 0;
+      offset_ = 0;
+    }
+
+    void GetWriteLatch() { while (!write_latch.compare_exchange_strong(false, true)) {}}
+    void ReleaseWriteLatch() { write_latch = false; }
+
+    class ScopedWriteLatch {
+      ScopedWriteLatch(BaseNode* node) : node_(node) {
+        node_->GetWriteLatch();
+      }
+      ~ScopedWriteLatch() {
+        node_->ReleaseWriteLatch();
+      }
+      BaseNode* node_;
+    };
   };
 
   class InnerNode : public BaseNode {
@@ -191,130 +298,108 @@ class BPlusTree {
       this->size_++;
     }
 
+    InnerNode* Merge() {
+      BaseNode::ScopedWriteLatch (this);
+      
+    }
+
     std::atomic<BaseNode *> children_[BRANCH_FACTOR];
     KeyType keys_[BRANCH_FACTOR - 1];
   };
 
   class LeafNode : public BaseNode {
    public:
-    static const uint64_t BITS_IN_UINT64 = 8 * sizeof(uint64_t);
-
     explicit LeafNode(BPlusTree *tree) : BaseNode(tree, NodeType::LEAF), left_(nullptr), right_(nullptr) {}
     ~LeafNode() = default;
 
     bool ScanPredicate(KeyType key, std::function<bool(const ValueType)> predicate) {
       LeafNode *current_leaf = this;
       bool no_bigger_keys = true;
-      current_leaf->base_latch_.LockShared();
       while (current_leaf != nullptr && no_bigger_keys) {
-//        common::SharedLatch::ScopedSharedLatch l(&current_leaf->base_latch_);
         for (uint16_t i = 0; i < current_leaf->size_; i++) {
-          if (current_leaf->tree_->KeyCmpEqual(key, current_leaf->keys_[i]) && predicate(current_leaf->values_[i])) {
-            current_leaf->base_latch_.Unlock();
-            return true;
-          }
-          if (current_leaf->tree_->KeyCmpLess(key, current_leaf->keys_[i])) {
-            no_bigger_keys = false;
+          if (current_leaf->IsReadable(i)) {
+            if (current_leaf->tree_->KeyCmpEqual(key, current_leaf->keys_[i]) && predicate(current_leaf->values_[i])) {
+              return true;
+            }
+            if (current_leaf->tree_->KeyCmpLess(key, current_leaf->keys_[i])) {
+              no_bigger_keys = false;
+            }
           }
         }
-        LeafNode *sibling = current_leaf;
         current_leaf = current_leaf->right_;
-        if (LIKELY(current_leaf != nullptr)) current_leaf->base_latch_.LockShared();
-        sibling->base_latch_.Unlock();
       }
-      if (current_leaf != nullptr) current_leaf->base_latch_.Unlock();
       return false;
     }
 
     bool InsertLeaf(KeyType key, ValueType value, std::function<bool(const ValueType)> predicate,
                     bool *predicate_satisfied) {
-      // look for deleted slot
+      BaseNode::ScopedWriteLatch (this);
+      if (UNLIKELY(this->deleted_)) {
+        return false;
+      }
+
       *predicate_satisfied = false;
-      KeyType insert_key = key;
-      ValueType insert_val = value;
+      bool saw_bigger = false;
+      for (uint16_t i = 0; i < this->size_; i++) {
+        if (IsReadable(i)) {
+          if (this->tree_->KeyCmpEqual(key, keys_[i]) && predicate(values_[i])) {
+            *predicate_satisfied = true;
+            return false;
+          } else if (this->tree_->KeyCmpGreater(keys_[i], key)) {
+            saw_bigger = true;
+          }
+        }
+      }
+
+      LeafNode *right = right_;
+      if (!saw_bigger && right != nullptr && (*predicate_satisfied = right->ScanPredicate(key, predicate))) {
+        return false;
+      }
+
+      // look for deleted slot
       uint16_t i;
-      for (i = 0; i < this->size_; i++) {
-        if (this->tree_->KeyCmpEqual(key, keys_[i]) && predicate(values_[i])) {
-          *predicate_satisfied = true;
-          return false;
-        }
-        if (this->tree_->KeyCmpLess(key, keys_[i])) {
-          break;
-        }
-      }
-
-      if (i == this->size_ && this->right_ != nullptr &&
-          (*predicate_satisfied = this->right_.load()->ScanPredicate(key, predicate))) {
-        return false;
-      }
-
-      if (this->size_ >= this->limit_.load()) {
-        return false;
-      }
-
-      for (; i < this->size_; i++) {
-        std::swap(insert_key, keys_[i]);
-        std::swap(insert_val, values_[i]);
-      }
-
-      keys_[i] = insert_key;
-      values_[i] = insert_val;
-      this->size_++;
-
-      return true;
-    }
-
-    bool Remove(KeyType key, ValueType value) {
-      common::SharedLatch::ScopedExclusiveLatch l(&this->base_latch_);
-      if (this->size_ == 0) {
-        return false;
-      }
-      if (this->tree_->KeyCmpEqual(key, keys_[this->size_ - 1]) &&
-          this->tree_->ValueCmpEqual(value, values_[this->size_ - 1])) {
-        this->size_--;
+      for (i = 0; i < this->size_ && IsReadable(i); i++) {}
+      if (i != this->size_) {
+        keys_[i] = key;
+        values_[i] = value;
+        UnmarkTombStone(i);
         return true;
       }
 
-      KeyType last_key = keys_[this->size_ - 1];
-      ValueType last_value = values_[this->size_ - 1];
+      if (this->size_ >= this->limit_) {
+        return false;
+      }
 
-      for (uint16_t i = 0; i < this->size_ - 1; i++)
-        if (this->tree_->KeyCmpEqual(key, keys_[i]) && this->tree_->ValueCmpEqual(value, values_[i])) {
-          keys_[i] = last_key;
-          values_[i] = last_value;
-          this->size_--;
-          return true;
-        }
-      return false;
+      keys_[this->size_] = key;
+      keys_[this->values_] = value;
+      this->size_++;
+      return true;
     }
 
     bool ScanRange(KeyType low, KeyType hi, std::vector<ValueType> *values) {
-      common::SharedLatch::ScopedExclusiveLatch l(&this->base_latch_);
       bool res = true;
       std::vector<std::pair<KeyType, ValueType>> temp_values;
       for (uint16_t i = 0; i < this->size_; i++) {
         if (IsReadable(i)) {
-          temp_values.emplace_back((keys_[i], values_[i]));
-          if (this->tree_->KeyCmpGreater(keys_[i], hi))
+          if (this->tree_->KeyCmpLessEqual(low, keys_[i].first) &&
+          this->tree_->KeyCmpLessEqual(keys_[i].first, hi)) {
+            temp_values.emplace_back((keys_[i], values_[i]));
+          } else if (this->tree_->KeyCmpGreater(keys_[i], hi)) {
             res = false;
+          }
         }
       }
 
       sort(temp_values.begin(), temp_values.end(), this->tree_->KeyCmpLess);
 
       for (uint16_t i = 0; i < temp_values.size(); i++) {
-        keys_[i] = temp_values[i].first;
-        values_[i] = temp_values[i].second;
-        if (this->tree_->KeyCmpLessEqual(low, keys_[i]) && this->tree_->KeyCmpGreaterEqual(hi, keys_[i])) {
           values->emplace_back(temp_values[i].second);
-        }
       }
 
-      this->size_ = temp_values.size();
-      tomb_stones_ = {};
       return res;
     }
 
+    // the tomb stoning could be made faster with better bit stuff
     bool IsReadable(uint16_t  i) {
       return !static_cast<bool>((tomb_stones_[i / BITS_IN_UINT64] >> (i % BITS_IN_UINT64)) & static_cast<uint64_t>(0x1));
     }
@@ -359,18 +444,19 @@ class BPlusTree {
 
     BPlusTreeIterator &operator++() {
       //TODO(emmanuee) fix this because it sucks (wraparound)
-      index_++;
-      if (index_ >= leaf_->size_) {
-        if (leaf_->right_ == nullptr) {
-          at_end_ = true;
-        } else {
-          LeafNode *next_leaf = leaf_->right_;
-          next_leaf->base_latch_.LockShared();
-          leaf_->base_latch_.Unlock();
-          leaf_ = next_leaf;
-          index_ = 0;
+      do {
+        index_++;
+        if (index_ >= leaf_->size_) {
+          if (leaf_->right_ == nullptr) {
+            at_end_ = true;
+            break;
+          } else {
+            leaf_ = leaf_->right_;
+            index_ = 0;
+          }
         }
-      }
+      } while (!leaf_->IsReadable(index_));
+
       return *this;
     }
 
@@ -382,18 +468,18 @@ class BPlusTree {
 
     BPlusTreeIterator operator--() {
       //TODO(emmanuee) fix this because it sucks (wraparound)
-      index_--;
-      if (index_ > leaf_->size_) {
-        if (leaf_->left_ == nullptr) {
-          at_rend_ = true;
-        } else {
-          LeafNode *next_leaf = leaf_->left_;
-          next_leaf->base_latch_.LockShared();
-          leaf_->base_latch_.Unlock();
-          leaf_ = next_leaf;
-          index_ = next_leaf->size_ - 1;
+      do {
+        index_--;
+        if (index_ > leaf_->size_) {
+          if (leaf_->left_ == nullptr) {
+            at_rend_ = true;
+            break;
+          } else {
+            leaf_ = leaf_->left_;
+            index_ = leaf_->size_ - 1;
+          }
         }
-      }
+      } while (!leaf_->IsReadable(index_));
       return *this;
     }
 
@@ -429,64 +515,41 @@ class BPlusTree {
   };
 
   inline bool OptimisticInsert(std::function<bool(const ValueType)> predicate, KeyType key, ValueType val, bool *predicate_satisfied) {
-    BaseNode *n;
-    LeafNode *leaf;
-    tree_latch_.LockShared();
-    n = root_;
-    if (n->GetType() == NodeType::LEAF) {
-      n->base_latch_.LockExclusive();
-    } else {
-      n->base_latch_.LockShared();
-    }
-    tree_latch_.Unlock();
-
+    BaseNode *n = root_;
     while (n->GetType() != NodeType::LEAF) {
       InnerNode *inner_n = static_cast<InnerNode *>(n);
       uint16_t child_index = inner_n->FindMinChild(key);
       n = inner_n->children_[child_index];
-
-      if (n->GetType() == NodeType::LEAF) {
-        n->base_latch_.LockExclusive();
-        inner_n->base_latch_.Unlock();
-        break;
-      }
-
-      n->base_latch_.LockShared();
-      inner_n->base_latch_.Unlock();
     }
 
-    leaf = static_cast<LeafNode *>(n);
-    bool result = leaf->InsertLeaf(key, val, predicate, predicate_satisfied);
-    leaf->base_latch_.Unlock();
-    return result;
+    return static_cast<LeafNode *>(n)->InsertLeaf(key, val, predicate, predicate_satisfied);
   }
 
   bool Insert(std::function<bool(const ValueType)> predicate, KeyType key, ValueType val, bool *predicate_satisfied) {
-//    if (OptimisticInsert(predicate, key, val, predicate_satisfied)) {
-//      return true;
-//    }
+    if (OptimisticInsert(predicate, key, val, predicate_satisfied)) {
+      return true;
+    }
 
     std::vector<InnerNode *> locked_nodes;
     std::vector<uint16_t> traversal_indices;
+    uint64_t locked_index = 0; // everything in locked_nodes from this index onwards is locked
 
-    tree_latch_.LockExclusive();
+    LatchRoot();
     bool holds_tree_latch = true;
     BaseNode *n = this->root_;
 
     // Find minimum leaf that stores would store key, taking locks as we go down tree
     while (n->GetType() != NodeType::LEAF) {
       auto inner_n = static_cast<InnerNode *>(n);
-      n->base_latch_.LockExclusive();
+      n->GetWriteLatch();
       if (n->size_ < n->limit_) {
-        if (holds_tree_latch) {
-          tree_latch_.Unlock();
+        if (holds_tree_latch && locked_index != 0) {
+          UnlatchRoot();
           holds_tree_latch = false;
         }
-        for (InnerNode *node : locked_nodes) {
-          node->base_latch_.Unlock();
+        for (; !locked_nodes.empty() && locked_index < locked_nodes.size() - 1; locked_index++) {
+          locked_nodes[locked_index]->ReleaseWriteLatch();
         }
-        locked_nodes.clear();
-        traversal_indices.clear();
       }
       uint16_t child_index = inner_n->FindMinChild(key);
       n = inner_n->children_[child_index];
@@ -496,266 +559,350 @@ class BPlusTree {
 
     // If leaf is not full, insert, unlock all parent nodes and return
     auto leaf = static_cast<LeafNode *>(n);
-    common::SharedLatch::ScopedExclusiveLatch l(&leaf->base_latch_);
     if (leaf->InsertLeaf(key, val, predicate, predicate_satisfied) || *predicate_satisfied) {
       if (holds_tree_latch) {
-        tree_latch_.Unlock();
-        holds_tree_latch = false;
+        UnlatchRoot();
       }
-      for (InnerNode *node : locked_nodes) {
-        node->base_latch_.Unlock();
+      for (; locked_index < locked_nodes.size(); locked_index++) {
+        locked_nodes[locked_index]->ReleaseWriteLatch();
       }
       return !(*predicate_satisfied);
     }
 
+    // returned false because of no tomb stones;
+
+    LeafNode *left, *right;
+    while (true) {
+      left = leaf->left_;
+      right = leaf->right_;
+      if (LIKELY(left != nullptr)) {
+        left->GetWriteLatch();
+        if (UNLIKELY(left != leaf->left_)) {
+          left->ReleaseWriteLatch();
+          continue;
+        }
+      }
+      leaf->GetWriteLatch();
+      if (LIKELY(right != nullptr)) {
+        right->GetWriteLatch();
+        if (UNLIKELY(right != leaf->right_)) {
+          if (LIKELY(left != nullptr)) left->ReleaseWriteLatch();
+          leaf->ReleaseWriteLatch();
+          right->ReleaseWriteLatch();
+          continue;
+        }
+      }
+      break;
+    }
+
     // Otherwise must split so create new leaf
-    structure_size_ += sizeof(LeafNode);
-    auto new_leaf = new LeafNode(this);
+    LeafNode* new_leaf_right = new LeafNode(this);
+    LeafNode* new_leaf_left = new LeafNode(this);
+
+    std::vector<std::pair<KeyType, ValueType>> kvps;
+    kvps.emplace_back((key, val));
+    for (uint16_t i = 0; i < leaf->size_; i++) {
+      kvps.emplace_back((leaf->keys_[i], leaf->values_[i]));
+    }
+
+    sort(kvps.begin(), kvps.end(), this->KeyCmpLess);
 
     // Determine keys and values to stay in current leaf and copy others to new leaf
-    uint16_t keep_in_leaf = leaf->size_ / 2;
-    for (uint16_t i = keep_in_leaf; i < leaf->size_; i++) {
-      new_leaf->keys_[i - keep_in_leaf] = leaf->keys_[i];
-      new_leaf->values_[i - keep_in_leaf] = leaf->values_[i];
+    uint16_t left_size = kvps.size() / 2;
+    uint16_t i;
+    for (i = 0; i < left_size; i++) {
+      new_leaf_left->keys_[i] = kvps[i].first;
+      new_leaf_left->values_[i] = kvps[i].second;
     }
-
-    // Update sizes of current and newly created leaf
-    new_leaf->size_ = leaf->size_ - keep_in_leaf;
-    leaf->size_ = keep_in_leaf;
-
-    bool result;
-    // Insert given key and value into appropriate leaf
-    if (KeyCmpLessEqual(key, new_leaf->keys_[0])) {
-      result = leaf->InsertLeaf(key, val, predicate, predicate_satisfied);
-    } else {
-      result = new_leaf->InsertLeaf(key, val, predicate, predicate_satisfied);
-    }
-    TERRIER_ASSERT(result, "insert should succede on split leaf");
-
-    // Update neighbor pointers for leaf nodes
-    new_leaf->left_ = leaf;
-    new_leaf->right_ = leaf->right_.load();
-    leaf->right_ = new_leaf;
-    if (LIKELY(new_leaf->right_ != nullptr)) {
-      new_leaf->right_.load()->left_ = new_leaf;
+    for (i = left_size; i < leaf->size_; i++) {
+      new_leaf_right->keys_[i - left_size] = kvps[i].first;
+      new_leaf_right->values_[i - left_size] = kvps[i].second;
     }
 
     // Determine pointer to new leaf to be pushed up to parent node
-    KeyType new_key = new_leaf->keys_[0];
+    KeyType new_key = new_leaf_right->keys_[0];
+
+    // Update sizes of current and newly created leaf
+    new_leaf_right->size_ = leaf->size_ - left_size;
+    new_leaf_left->size_ = left_size;
+
+    // Update neighbor pointers for leaf nodes
+    new_leaf_left->left_ = leaf->left_;
+    new_leaf_left->right_ = new_leaf_right;
+    new_leaf_right->left_ = new_leaf_left;
+    new_leaf_right->right_ = leaf->right_;
+
+    if (LIKELY(left != nullptr)) {
+      left->right_ = new_leaf_left;
+      left->ReleaseWriteLatch();
+    }
+    leaf->MarkDeleted();
+    leaf->ReleaseWriteLatch();
+    if (LIKELY(right != nullptr)) {
+      right->left_ = new_leaf_right;
+      right->ReleaseWriteLatch();
+    }
 
     // If split is on root (leaf)
     if (UNLIKELY(locked_nodes.empty())) {
       TERRIER_ASSERT(leaf == root_ && holds_tree_latch,
                      "somehow we had to split a leaf without having to modify the parent");
       // Create new root and update attributes for new root and tree
-      structure_size_ += sizeof(InnerNode);
       auto new_root = new InnerNode(this);
       new_root->keys_[0] = new_key;
-      new_root->children_[0] = leaf;
-      new_root->children_[1] = new_leaf;
+      new_root->children_[0] = new_leaf_left;
+      new_root->children_[1] = new_leaf_right;
       new_root->size_ = 1;
+      BaseNode *old_root = root_;
       root_ = new_root;
-      tree_latch_.Unlock();
+      old_root->MarkDeleted();
+      old_root->ReleaseWriteLatch();
+      UnlatchRoot();
       return true;
     }
 
-    InnerNode *old_node = nullptr, *new_node = nullptr;
-    auto new_child = static_cast<BaseNode *>(new_leaf);
+    InnerNode *old_node = nullptr, *new_node_left = nullptr, *new_node_right = nullptr;
+    auto new_child_left = static_cast<BaseNode *>(new_leaf_left);
+    auto new_child_right = static_cast<BaseNode *>(new_leaf_right);
 
-    for (uint64_t i = locked_nodes.size() - 1;
-         i < locked_nodes.size() && locked_nodes[i]->size_ == locked_nodes[i]->limit_; i--) {
-      old_node = locked_nodes[i];
-      uint16_t child_index = traversal_indices[i];
-      structure_size_ += sizeof(InnerNode);
-      new_node = new InnerNode(this);
-      for (uint16_t node_index = child_index; node_index < old_node->size_; node_index++) {
-        std::swap(new_key, old_node->keys_[node_index]);
-        BaseNode *temp = new_child;
-        new_child = old_node->children_[node_index + 1];
-        old_node->children_[node_index + 1] = temp;
+    while (!locked_nodes.empty()) {
+      old_node = locked_nodes.pop_back();
+      if (old_node->size_ < old_node->limit_) {
+        break;
       }
 
-      uint16_t lower_length = old_node->size_ / 2;
-      new_node->size_ = old_node->size_ - lower_length;
-      new_node->keys_[new_node->size_ - 1] = new_key;
-      new_node->children_[new_node->size_] = new_child;
-
-      for (uint16_t node_index = lower_length + 1; node_index < old_node->size_; node_index++) {
-        new_node->keys_[node_index - lower_length - 1] = old_node->keys_[node_index];
-        new_node->children_[node_index - lower_length] = old_node->children_[node_index + 1].load();
+      new_node_left = new InnerNode(this);
+      new_node_right = new InnerNode(this);
+      for (i = 0; i < old_node->size_; i++) {
+        new_node_left->keys_[i] = old_node->keys_[i];
+        new_node_left->children_[i] = old_node->children_[i];
       }
-      new_node->children_[0] = old_node->children_[lower_length + 1].load();
-      old_node->size_ = lower_length;
-      new_key = old_node->keys_[lower_length];
-      new_child = static_cast<BaseNode *>(new_node);
+      new_node_left->children_[0] = old_node->children_[0];
+      uint16_t child_index = traversal_indices.pop_back();
+      new_node_left->children_[child_index] = new_child_left;
+      new_node_left->size_ = old_node->size_;
+
+      for (uint16_t node_index = child_index; node_index < new_node_left->size_; node_index++) {
+        std::swap(new_key, new_node_left->keys_[node_index]);
+        BaseNode *temp = new_child_right;
+        new_child_right = old_node->children_[node_index + 1];
+        new_node_left->children_[node_index + 1] = temp;
+      }
+
+      uint16_t lower_length = new_node_left->size_ / 2;
+      new_node_right->size_ = new_node_left->size_ - lower_length;
+      new_node_right->keys_[new_node_right->size_ - 1] = new_key;
+      new_node_right->children_[new_node_right->size_] = new_child_right;
+
+      for (uint16_t node_index = lower_length + 1; node_index < new_node_left->size_; node_index++) {
+        new_node_right->keys_[node_index - lower_length - 1] = new_node_left->keys_[node_index];
+        new_node_right->children_[node_index - lower_length] = new_node_left->children_[node_index + 1];
+      }
+      new_node_right->children_[0] = new_node_left->children_[lower_length + 1];
+      new_node_left->size_ = lower_length;
+      new_key = new_node_left->keys_[lower_length];
+      new_child_left = static_cast<BaseNode *>(new_node_left);
+      new_child_right = static_cast<BaseNode *>(new_node_right);
+
+      old_node->MarkDeleted();
+      old_node->ReleaseWriteLatch();
     }
 
-    // Root is being split so must create new root node
-    if (old_node == root_) {
-      TERRIER_ASSERT(locked_nodes[0] == root_ && holds_tree_latch, "must hold tree latch to modify root");
-      structure_size_ += sizeof(InnerNode);
+
+    if (old_node->size_ < old_node->limit_) {
+      TERRIER_ASSERT(old_node->write_latch, "must hold write latch if not full");
+      InnerNode* new_node = new InnerNode(this);
+      new_node->size_ = old_node->size_;
+      for (i = 0; i < old_node->size_; i++) {
+        new_node->keys_[i] = old_node->keys_[i];
+        new_node->children_[i + 1] = old_node->children_[i + 1];
+      }
+      new_node->children_[0] = old_node->children_[0];
+
+      uint16_t child_index = traversal_indices.pop_back();
+      TERRIER_ASSERT(traversal_indices.size() == locked_nodes.size(),
+          "they should be pushed onto and popped from equally");
+      new_node->children_[child_index] = new_child_left;
+      new_node->InsertInner(new_key, new_child_right);
+
+      old_node->MarkDeleted();
+      old_node->ReleaseWriteLatch();
+
+      if (old_node == root_) {
+        TERRIER_ASSERT(holds_tree_latch && locked_nodes.empty(),
+            "must hold tree latch if held latch on root");
+        root_ = new_node;
+        UnlatchRoot();
+      } else {
+        TERRIER_ASSERT(!holds_tree_latch || !locked_nodes.empty(),
+                       "if we are not at the root then we should not hold the tree latch"
+                       "and should have released some write latches");
+        uint16_t child_index = traversal_indices.pop_back();
+        old_node = locked_nodes.pop_back();
+        old_node->children_[child_index] = new_node;
+        old_node->ReleaseWriteLatch();
+      }
+    } else {
+      TERRIER_ASSERT(locked_nodes.empty() && old_node == root_ && holds_tree_latch,
+          "we should have split all the way to the top");
       auto new_root = new InnerNode(this);
       new_root->keys_[0] = new_key;
-      new_root->children_[0] = old_node;
-      new_root->children_[1] = new_node;
+      new_root->children_[0] = new_child_left;
+      new_root->children_[1] = new_child_right;
       new_root->size_ = 1;
       root_ = new_root;
-      tree_latch_.Unlock();
-    } else {
-      TERRIER_ASSERT(locked_nodes[0]->size_ != locked_nodes[0]->limit_, "top node in split was full but not the root");
-
-      locked_nodes[0]->InsertInner(new_key, new_child);
+      old_node->MarkDeleted();
+      old_node->ReleaseWriteLatch();
+      UnlatchRoot();
     }
 
-    // Unlock all latches incurred on insert
-    for (InnerNode *node : locked_nodes) {
-      node->base_latch_.Unlock();
-    }
     return true;
   }
 
   void ScanKey(KeyType key, std::vector<ValueType> *values) {
-    InnerNode *parent;
-    tree_latch_.LockShared();
     BaseNode *n = this->root_;
-    n->base_latch_.LockShared();
-    tree_latch_.Unlock();
     while (n->GetType() != NodeType::LEAF) {
       auto *inner_n = static_cast<InnerNode *>(n);
-      parent = static_cast<InnerNode *>(n);
       uint16_t n_index = inner_n->FindMinChild(key);
       n = inner_n->children_[n_index];
-      n->base_latch_.LockShared();
-      parent->base_latch_.Unlock();
     }
 
     auto leaf = static_cast<LeafNode *>(n);
     LeafNode *sibling;
     while (true) {
       if (!leaf->ScanRange(key, key, values)) {
-        leaf->base_latch_.Unlock();
         break;
       }
-      sibling = leaf;
       leaf = leaf->right_;
       if (leaf == nullptr) {
-        sibling->base_latch_.Unlock();
         break;
       }
-      leaf->base_latch_.LockShared();
-      sibling->base_latch_.Unlock();
     }
+  }
+
+  bool Remove(KeyType key, ValueType value) {
+    BaseNode *n = this->root_;
+    while (n->GetType() != NodeType::LEAF) {
+      auto *inner_n = static_cast<InnerNode *>(n);
+      uint16_t n_index = inner_n->FindMinChild(key);
+      n = inner_n->children_[n_index];
+    }
+
+    bool done = false;
+    for (LeafNode* leaf = static_cast<LeafNode *>(n); leaf != nullptr && !done; leaf = leaf->right_) {
+      BaseNode::ScopedWriteLatch (leaf);
+      for (uint16_t i = 0; i < leaf->size_; i++) {
+        if (leaf->IsReadable(i)) {
+          if (KeyCmpEqual(key, leaf->keys_[i]) && value_eq_obj_(value, leaf->values_[i])) {
+            leaf->MarkTombStone(i);
+            return true;
+          } else if (KeyCmpLess(key, leaf->keys_[i])) {
+            done = true;
+          }
+        }
+      }
+    }
+
+    return false;
   }
 
   BPlusTreeIterator Begin() {
     InnerNode *parent;
-    tree_latch_.LockShared();
     BaseNode *n = this->root_;
-    n->base_latch_.LockShared();
-    tree_latch_.Unlock();
 
     while (n->GetType() != NodeType::LEAF) {
       auto *inner_n = static_cast<InnerNode *>(n);
-      parent = static_cast<InnerNode *>(n);
       n = inner_n->children_[0];
       TERRIER_ASSERT(n != nullptr, "child of inner node should be non-null");
-      n->base_latch_.LockShared();
-      parent->base_latch_.Unlock();
     }
 
-    auto leaf = static_cast<LeafNode *>(n);
-    return {leaf, 0};
+    auto leaf_og = static_cast<LeafNode *>(n);
+    for (LeafNode *leaf = leaf_og; leaf != nullptr; leaf = leaf->right_) {
+      for (uint16_t i = 0; i < leaf->size_; i++) {
+        if (leaf->IsReadable(i)) {
+          return {leaf, i};
+        }
+      }
+      leaf_og = leaf;
+    }
+    return {leaf_og, leaf_og->size_ - 1, true, false};
   }
 
   BPlusTreeIterator Begin(KeyType key) {
-    InnerNode *parent;
-    tree_latch_.LockShared();
     BaseNode *n = this->root_;
-    n->base_latch_.LockShared();
-    tree_latch_.Unlock();
 
     while (n->GetType() != NodeType::LEAF) {
       auto *inner_n = static_cast<InnerNode *>(n);
-      parent = static_cast<InnerNode *>(n);
       n = inner_n->children_[inner_n->FindMinChild(key)];
       TERRIER_ASSERT(n != nullptr, "child of inner node should be non-null");
-      n->base_latch_.LockShared();
-      parent->base_latch_.Unlock();
     }
-    auto leaf = static_cast<LeafNode *>(n);
-    uint16_t i;
-    for (i = 0; i < leaf->size_ && KeyCmpGreater(key, leaf->keys_[i]); i++) {
-    }
-    if (i == leaf->size_) {
-      LeafNode *next_leaf = leaf->right_;
-      if (next_leaf == nullptr) {
-        leaf->base_latch_.Unlock();
-        return {leaf, static_cast<uint16_t>(i - 1), true, false};
+
+    auto leaf_og = static_cast<LeafNode *>(n);
+    for (LeafNode *leaf = leaf_og; leaf != nullptr; leaf = leaf->right_) {
+      for (uint16_t i = 0; i < leaf->size_; i++) {
+        if (leaf->IsReadable(i) && KeyCmpGreaterEqual(key, leaf->keys_[i])) {
+          return {leaf, i};
+        }
       }
-      next_leaf->base_latch_.LockShared();
-      leaf->base_latch_.Unlock();
-      return {next_leaf, 0};
+      leaf_og = leaf;
     }
-    return {leaf, i};
+    return {leaf_og, leaf_og->size_ - 1, true, false};
   }
 
   BPlusTreeIterator RBegin() {
-    InnerNode *parent;
-    tree_latch_.LockShared();
     BaseNode *n = this->root_;
-    n->base_latch_.LockShared();
-    tree_latch_.Unlock();
     while (n->GetType() != NodeType::LEAF) {
       auto *inner_n = static_cast<InnerNode *>(n);
-      parent = static_cast<InnerNode *>(n);
       n = inner_n->children_[inner_n->size_];
       TERRIER_ASSERT(n != nullptr, "child of inner node should be non-null");
-      n->base_latch_.LockShared();
-      parent->base_latch_.Unlock();
     }
-    auto leaf = static_cast<LeafNode *>(n);
-    return {leaf, leaf->size_ - 1};
+
+    auto leaf_og = static_cast<LeafNode *>(n);
+    for (LeafNode *leaf = leaf_og; leaf != nullptr; leaf = leaf->left_) {
+      for (uint16_t i = leaf->size_ - 1; i < leaf->size_; i--) {
+        if (leaf->IsReadable(i)) {
+          return {leaf, i};
+        }
+      }
+      leaf_og = leaf;
+    }
+    return {leaf_og, 0, false, true};
   }
 
   BPlusTreeIterator RBegin(KeyType key) {
-    InnerNode *parent;
-    tree_latch_.LockShared();
     BaseNode *n = this->root_;
-    n->base_latch_.LockShared();
-    tree_latch_.Unlock();
-
     while (n->GetType() != NodeType::LEAF) {
       auto *inner_n = static_cast<InnerNode *>(n);
-      parent = static_cast<InnerNode *>(n);
       n = inner_n->FindMaxChild(key);
       TERRIER_ASSERT(n != nullptr, "child of inner node should be non-null");
-      n->base_latch_.LockShared();
-      parent->base_latch_.Unlock();
     }
-    auto leaf = static_cast<LeafNode *>(n);
-    uint16_t i;
-    for (i = leaf->size_ - 1; i < leaf->size_ && KeyCmpLess(key, leaf->keys_[i]); i--) {
-    }
-    if (i > leaf->size_) {
-      LeafNode *next_leaf = leaf->left_;
-      if (next_leaf == nullptr) {
-        leaf->base_latch_.Unlock();
-        return {leaf, 0, false, true};
+
+    auto leaf_og = static_cast<LeafNode *>(n);
+    for (LeafNode *leaf = leaf_og; leaf != nullptr; leaf = leaf->left_) {
+      for (uint16_t i = leaf->size_ - 1; i < leaf->size_; i--) {
+        if (leaf->IsReadable(i) && KeyCmpLessEqual(key, leaf->keys_[i])) {
+          return {leaf, i};
+        }
       }
-      next_leaf->base_latch_.LockShared();
-      leaf->base_latch_.Unlock();
-      return {next_leaf, static_cast<uint16_t>(next_leaf->size_ - 1)};
+      leaf_og = leaf;
     }
-    return {leaf, i};
+    return {leaf_og, 0, false, true};
   }
   BPlusTreeIterator End() { return END; }
   BPlusTreeIterator REnd() { return REND; }
   bool FastEnd() { return true; }
   char FastREnd() { return 0x0; }
 
+  void LatchRoot() {
+    while (!root_latch_.compare_exchange_strong(false, true)) {}
+  }
+
+  void UnlatchRoot() { root_latch_ = false; }
+
+  std::atomic<uint64_t> epoch_;
+  std::atomic<bool> root_latch_;
   std::atomic<BaseNode *> root_;
   std::atomic<uint64_t> structure_size_;
-  common::SharedLatch tree_latch_;
   const BPlusTreeIterator END = {true};
   const BPlusTreeIterator REND = {false};
 };
