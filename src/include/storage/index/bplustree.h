@@ -197,7 +197,7 @@ class BPlusTree {
 
   class LeafNode : public BaseNode {
    public:
-    static const uint64_t DELETE_MASK_SIZE = 64;
+    static const uint64_t BITS_IN_UINT64 = 8 * sizeof(uint64_t);
 
     explicit LeafNode(BPlusTree *tree) : BaseNode(tree, NodeType::LEAF), left_(nullptr), right_(nullptr) {}
     ~LeafNode() = default;
@@ -289,16 +289,56 @@ class BPlusTree {
     }
 
     bool ScanRange(KeyType low, KeyType hi, std::vector<ValueType> *values) {
+      common::SharedLatch::ScopedExclusiveLatch l(&this->base_latch_);
       bool res = true;
+      std::vector<std::pair<KeyType, ValueType>> temp_values;
       for (uint16_t i = 0; i < this->size_; i++) {
-        if (this->tree_->KeyCmpGreaterEqual(keys_[i], low) && this->tree_->KeyCmpLessEqual(keys_[i], hi))
-          values->emplace_back(values_[i]);
-        else if (this->tree_->KeyCmpGreater(keys_[i], hi))
-          res = false;
+        if (IsReadable(i)) {
+          temp_values.emplace_back((keys_[i], values_[i]));
+          if (this->tree_->KeyCmpGreater(keys_[i], hi))
+            res = false;
+        }
       }
+
+      sort(temp_values.begin(), temp_values.end(), this->tree_->KeyCmpLess);
+
+      for (uint16_t i = 0; i < temp_values.size(); i++) {
+        keys_[i] = temp_values[i].first;
+        values_[i] = temp_values[i].second;
+        if (this->tree_->KeyCmpLessEqual(low, keys_[i]) && this->tree_->KeyCmpGreaterEqual(hi, keys_[i])) {
+          values->emplace_back(temp_values[i].second);
+        }
+      }
+
+      this->size_ = temp_values.size();
+      tomb_stones_ = {};
       return res;
     }
 
+    bool IsReadable(uint16_t  i) {
+      return !static_cast<bool>((tomb_stones_[i / BITS_IN_UINT64] >> (i % BITS_IN_UINT64)) & static_cast<uint64_t>(0x1));
+    }
+
+    void MarkTombStone(uint16_t i) {
+      while (true) {
+        uint64_t old_value = tomb_stones_[i / BITS_IN_UINT64];
+        uint16_t new_value = old_value | (static_cast<uint64_t>(0x1) << (i % BITS_IN_UINT64));
+        if (!tomb_stones_[i / BITS_IN_UINT64].compare_exchange_strong(old_value, new_value)) continue;
+        return;
+      }
+    }
+
+    void UnmarkTombStone(uint16_t i) {
+      while (true) {
+        uint64_t old_value = tomb_stones_[i / BITS_IN_UINT64];
+        uint16_t new_value = old_value & (~(static_cast<uint64_t>(0x1) << (i % BITS_IN_UINT64)));
+        if (!tomb_stones_[i / BITS_IN_UINT64].compare_exchange_strong(old_value, new_value)) continue;
+        return;
+      }
+    }
+
+    // at least as many bits as key value pairs in leaf
+    std::atomic<uint64_t> tomb_stones_[(LEAF_SIZE + BITS_IN_UINT64 - 1) / BITS_IN_UINT64] = {};
     std::atomic<LeafNode *> left_, right_;
     KeyType keys_[LEAF_SIZE] = {};
     ValueType values_[LEAF_SIZE] = {};
@@ -588,6 +628,7 @@ class BPlusTree {
       n->base_latch_.LockShared();
       parent->base_latch_.Unlock();
     }
+
     auto leaf = static_cast<LeafNode *>(n);
     LeafNode *sibling;
     while (true) {
