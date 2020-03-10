@@ -237,7 +237,7 @@ class BPlusTree {
 
     void MarkDeleted() {
       deleted_ = true;
-      deleted_epoch_ = tree_->epoch_;
+      deleted_epoch_ = tree_->epoch_.load();
     }
 
     void Reallocate() {
@@ -248,10 +248,15 @@ class BPlusTree {
       offset_ = 0;
     }
 
-    void GetWriteLatch() { while (!write_latch.compare_exchange_strong(false, true)) {}}
+    void GetWriteLatch() {
+      bool t = true;
+      bool f = false;
+      while (!write_latch.compare_exchange_strong(f, t)) {}
+    }
     void ReleaseWriteLatch() { write_latch = false; }
 
     class ScopedWriteLatch {
+     public:
       ScopedWriteLatch(BaseNode* node) : node_(node) {
         node_->GetWriteLatch();
       }
@@ -300,7 +305,7 @@ class BPlusTree {
 
     InnerNode* Merge() {
       BaseNode::ScopedWriteLatch (this);
-      
+
     }
 
     std::atomic<BaseNode *> children_[BRANCH_FACTOR];
@@ -333,7 +338,7 @@ class BPlusTree {
 
     bool InsertLeaf(KeyType key, ValueType value, std::function<bool(const ValueType)> predicate,
                     bool *predicate_satisfied) {
-      BaseNode::ScopedWriteLatch (this);
+      typename BaseNode::ScopedWriteLatch l(this);
       if (UNLIKELY(this->deleted_)) {
         return false;
       }
@@ -371,26 +376,28 @@ class BPlusTree {
       }
 
       keys_[this->size_] = key;
-      keys_[this->values_] = value;
+      values_[this->size_] = value;
       this->size_++;
       return true;
     }
 
-    bool ScanRange(KeyType low, KeyType hi, std::vector<ValueType> *values) {
+    bool ScanRange(KeyType low, KeyType *hi, std::vector<ValueType> *values) {
       bool res = true;
       std::vector<std::pair<KeyType, ValueType>> temp_values;
       for (uint16_t i = 0; i < this->size_; i++) {
         if (IsReadable(i)) {
-          if (this->tree_->KeyCmpLessEqual(low, keys_[i].first) &&
-          this->tree_->KeyCmpLessEqual(keys_[i].first, hi)) {
-            temp_values.emplace_back((keys_[i], values_[i]));
-          } else if (this->tree_->KeyCmpGreater(keys_[i], hi)) {
+          if (this->tree_->KeyCmpLessEqual(low, keys_[i]) &&
+              (hi == nullptr || this->tree_->KeyCmpLessEqual(keys_[i], *hi))) {
+            temp_values.emplace_back(std::pair<KeyType, ValueType>(keys_[i], values_[i]));
+          } else if (hi == nullptr || this->tree_->KeyCmpGreater(keys_[i], *hi)) {
             res = false;
           }
         }
       }
 
-      sort(temp_values.begin(), temp_values.end(), this->tree_->KeyCmpLess);
+      sort(temp_values.begin(), temp_values.end(),  [&] (std::pair<KeyType, ValueType> a, std::pair<KeyType, ValueType> b) {
+        return this->tree_->KeyCmpLess(a.first, b.first);
+      });
 
       for (uint16_t i = 0; i < temp_values.size(); i++) {
           values->emplace_back(temp_values[i].second);
@@ -429,100 +436,8 @@ class BPlusTree {
     ValueType values_[LEAF_SIZE] = {};
   };
 
-  class BPlusTreeIterator {
-   public:
-    BPlusTreeIterator(LeafNode *leaf, uint16_t index, bool at_end = false, bool at_rend = false)
-        : leaf_(leaf), index_(index), at_end_(at_end), at_rend_(at_rend), is_end_(false), is_begin_(false) {}
-    // isEnd_or_NotIsBegin is true if is end and false if is begin
-    BPlusTreeIterator(bool isEnd_or_NotIsBegin)
-        : leaf_(nullptr),
-          index_(0),
-          at_end_(false),
-          at_rend_(false),
-          is_end_(isEnd_or_NotIsBegin),
-          is_begin_(!isEnd_or_NotIsBegin) {}
-
-    BPlusTreeIterator &operator++() {
-      //TODO(emmanuee) fix this because it sucks (wraparound)
-      do {
-        index_++;
-        if (index_ >= leaf_->size_) {
-          if (leaf_->right_ == nullptr) {
-            at_end_ = true;
-            break;
-          } else {
-            leaf_ = leaf_->right_;
-            index_ = 0;
-          }
-        }
-      } while (!leaf_->IsReadable(index_));
-
-      return *this;
-    }
-
-    BPlusTreeIterator &operator++(int) {
-      BPlusTreeIterator tmp = *this;
-      this ++;
-      return tmp;
-    }
-
-    BPlusTreeIterator operator--() {
-      //TODO(emmanuee) fix this because it sucks (wraparound)
-      do {
-        index_--;
-        if (index_ > leaf_->size_) {
-          if (leaf_->left_ == nullptr) {
-            at_rend_ = true;
-            break;
-          } else {
-            leaf_ = leaf_->left_;
-            index_ = leaf_->size_ - 1;
-          }
-        }
-      } while (!leaf_->IsReadable(index_));
-      return *this;
-    }
-
-    BPlusTreeIterator &operator--(int) {
-      BPlusTreeIterator tmp = *this;
-      this --;
-      return tmp;
-    }
-
-    bool operator==(BPlusTreeIterator other) {
-      if (LIKELY(other.is_end_)) {
-        return at_end_;
-      }
-      if (LIKELY(is_end_)) {
-        return other.at_end_;
-      }
-      return leaf_ == other.leaf_ && index_ == other.index_;
-    }
-
-    bool operator!=(BPlusTreeIterator other) { return !operator==(other); }
-
-    bool operator==(bool end) { return at_end_; }
-    bool operator!=(bool end) { return !operator==(end); }
-    bool operator==(char rend) { return at_rend_; }
-    bool operator!=(char rend) { return !operator==(rend); }
-
-    KeyType GetKey() { return leaf_->keys_[index_]; }
-    ValueType GetValue() { return leaf_->values_[index_]; }
-
-    LeafNode *leaf_;
-    uint16_t index_;
-    bool at_end_, at_rend_, is_end_, is_begin_;
-  };
-
   inline bool OptimisticInsert(std::function<bool(const ValueType)> predicate, KeyType key, ValueType val, bool *predicate_satisfied) {
-    BaseNode *n = root_;
-    while (n->GetType() != NodeType::LEAF) {
-      InnerNode *inner_n = static_cast<InnerNode *>(n);
-      uint16_t child_index = inner_n->FindMinChild(key);
-      n = inner_n->children_[child_index];
-    }
-
-    return static_cast<LeafNode *>(n)->InsertLeaf(key, val, predicate, predicate_satisfied);
+    return FindMinLeaf(key)->InsertLeaf(key, val, predicate, predicate_satisfied);
   }
 
   bool Insert(std::function<bool(const ValueType)> predicate, KeyType key, ValueType val, bool *predicate_satisfied) {
@@ -600,12 +515,14 @@ class BPlusTree {
     LeafNode* new_leaf_left = new LeafNode(this);
 
     std::vector<std::pair<KeyType, ValueType>> kvps;
-    kvps.emplace_back((key, val));
+    kvps.emplace_back(std::pair<KeyType, ValueType>(key, val));
     for (uint16_t i = 0; i < leaf->size_; i++) {
-      kvps.emplace_back((leaf->keys_[i], leaf->values_[i]));
+      kvps.emplace_back(std::pair<KeyType, ValueType>(leaf->keys_[i], leaf->values_[i]));
     }
 
-    sort(kvps.begin(), kvps.end(), this->KeyCmpLess);
+    sort(kvps.begin(), kvps.end(), [&] (std::pair<KeyType, ValueType> a, std::pair<KeyType, ValueType> b) {
+      return this->KeyCmpLess(a.first, b.first);
+    });
 
     // Determine keys and values to stay in current leaf and copy others to new leaf
     uint16_t left_size = kvps.size() / 2;
@@ -627,10 +544,10 @@ class BPlusTree {
     new_leaf_left->size_ = left_size;
 
     // Update neighbor pointers for leaf nodes
-    new_leaf_left->left_ = leaf->left_;
+    new_leaf_left->left_ = leaf->left_.load();
     new_leaf_left->right_ = new_leaf_right;
     new_leaf_right->left_ = new_leaf_left;
-    new_leaf_right->right_ = leaf->right_;
+    new_leaf_right->right_ = leaf->right_.load();
 
     if (LIKELY(left != nullptr)) {
       left->right_ = new_leaf_left;
@@ -666,7 +583,8 @@ class BPlusTree {
     auto new_child_right = static_cast<BaseNode *>(new_leaf_right);
 
     while (!locked_nodes.empty()) {
-      old_node = locked_nodes.pop_back();
+      old_node = locked_nodes.back();
+      locked_nodes.pop_back();
       if (old_node->size_ < old_node->limit_) {
         break;
       }
@@ -675,17 +593,18 @@ class BPlusTree {
       new_node_right = new InnerNode(this);
       for (i = 0; i < old_node->size_; i++) {
         new_node_left->keys_[i] = old_node->keys_[i];
-        new_node_left->children_[i] = old_node->children_[i];
+        new_node_left->children_[i] = old_node->children_[i].load();
       }
-      new_node_left->children_[0] = old_node->children_[0];
-      uint16_t child_index = traversal_indices.pop_back();
+      new_node_left->children_[0] = old_node->children_[0].load();
+      uint16_t child_index = traversal_indices.back();
+      traversal_indices.pop_back();
       new_node_left->children_[child_index] = new_child_left;
-      new_node_left->size_ = old_node->size_;
+      new_node_left->size_ = old_node->size_.load();
 
       for (uint16_t node_index = child_index; node_index < new_node_left->size_; node_index++) {
         std::swap(new_key, new_node_left->keys_[node_index]);
         BaseNode *temp = new_child_right;
-        new_child_right = old_node->children_[node_index + 1];
+        new_child_right = old_node->children_[node_index + 1].load();
         new_node_left->children_[node_index + 1] = temp;
       }
 
@@ -696,9 +615,9 @@ class BPlusTree {
 
       for (uint16_t node_index = lower_length + 1; node_index < new_node_left->size_; node_index++) {
         new_node_right->keys_[node_index - lower_length - 1] = new_node_left->keys_[node_index];
-        new_node_right->children_[node_index - lower_length] = new_node_left->children_[node_index + 1];
+        new_node_right->children_[node_index - lower_length] = new_node_left->children_[node_index + 1].load();
       }
-      new_node_right->children_[0] = new_node_left->children_[lower_length + 1];
+      new_node_right->children_[0] = new_node_left->children_[lower_length + 1].load();
       new_node_left->size_ = lower_length;
       new_key = new_node_left->keys_[lower_length];
       new_child_left = static_cast<BaseNode *>(new_node_left);
@@ -712,14 +631,15 @@ class BPlusTree {
     if (old_node->size_ < old_node->limit_) {
       TERRIER_ASSERT(old_node->write_latch, "must hold write latch if not full");
       InnerNode* new_node = new InnerNode(this);
-      new_node->size_ = old_node->size_;
+      new_node->size_ = old_node->size_.load();
       for (i = 0; i < old_node->size_; i++) {
         new_node->keys_[i] = old_node->keys_[i];
-        new_node->children_[i + 1] = old_node->children_[i + 1];
+        new_node->children_[i + 1] = old_node->children_[i + 1].load();
       }
-      new_node->children_[0] = old_node->children_[0];
+      new_node->children_[0] = old_node->children_[0].load();
 
-      uint16_t child_index = traversal_indices.pop_back();
+      uint16_t child_index = traversal_indices.back();
+      traversal_indices.pop_back();
       TERRIER_ASSERT(traversal_indices.size() == locked_nodes.size(),
           "they should be pushed onto and popped from equally");
       new_node->children_[child_index] = new_child_left;
@@ -737,8 +657,10 @@ class BPlusTree {
         TERRIER_ASSERT(!holds_tree_latch || !locked_nodes.empty(),
                        "if we are not at the root then we should not hold the tree latch"
                        "and should have released some write latches");
-        uint16_t child_index = traversal_indices.pop_back();
-        old_node = locked_nodes.pop_back();
+        child_index = traversal_indices.back();
+        traversal_indices.pop_back();
+        old_node = locked_nodes.back();
+        locked_nodes.pop_back();
         old_node->children_[child_index] = new_node;
         old_node->ReleaseWriteLatch();
       }
@@ -760,17 +682,9 @@ class BPlusTree {
   }
 
   void ScanKey(KeyType key, std::vector<ValueType> *values) {
-    BaseNode *n = this->root_;
-    while (n->GetType() != NodeType::LEAF) {
-      auto *inner_n = static_cast<InnerNode *>(n);
-      uint16_t n_index = inner_n->FindMinChild(key);
-      n = inner_n->children_[n_index];
-    }
-
-    auto leaf = static_cast<LeafNode *>(n);
-    LeafNode *sibling;
+    auto leaf = FindMinLeaf(key);
     while (true) {
-      if (!leaf->ScanRange(key, key, values)) {
+      if (!leaf->ScanRange(key, &key, values)) {
         break;
       }
       leaf = leaf->right_;
@@ -781,15 +695,8 @@ class BPlusTree {
   }
 
   bool Remove(KeyType key, ValueType value) {
-    BaseNode *n = this->root_;
-    while (n->GetType() != NodeType::LEAF) {
-      auto *inner_n = static_cast<InnerNode *>(n);
-      uint16_t n_index = inner_n->FindMinChild(key);
-      n = inner_n->children_[n_index];
-    }
-
     bool done = false;
-    for (LeafNode* leaf = static_cast<LeafNode *>(n); leaf != nullptr && !done; leaf = leaf->right_) {
+    for (LeafNode* leaf = FindMinLeaf(key); leaf != nullptr && !done; leaf = leaf->right_) {
       BaseNode::ScopedWriteLatch (leaf);
       for (uint16_t i = 0; i < leaf->size_; i++) {
         if (leaf->IsReadable(i)) {
@@ -802,99 +709,59 @@ class BPlusTree {
         }
       }
     }
-
     return false;
   }
 
-  BPlusTreeIterator Begin() {
-    InnerNode *parent;
-    BaseNode *n = this->root_;
+  void ScanDescending(KeyType lo, KeyType hi, std::vector<ValueType> *values) {
+    for (LeafNode *l = FindMaxLeaf(hi); l != nullptr && !l->ScanRange(lo, &hi, values); l = l->left_) {}
+  }
 
+  void ScanDescendingLimit(KeyType lo, KeyType hi, uint32_t limit, std::vector<ValueType> *values) {
+    for (LeafNode *l = FindMaxLeaf(hi); l != nullptr && values->size() < limit && !l->ScanRange(lo, &hi, values); l = l->left_) {}
+    while (values->size() > limit) values->pop_back();
+  }
+
+  LeafNode* FindMinLeaf() {
+    BaseNode *n = root_;
     while (n->GetType() != NodeType::LEAF) {
-      auto *inner_n = static_cast<InnerNode *>(n);
+      InnerNode *inner_n = static_cast<InnerNode *>(n);
       n = inner_n->children_[0];
-      TERRIER_ASSERT(n != nullptr, "child of inner node should be non-null");
     }
-
-    auto leaf_og = static_cast<LeafNode *>(n);
-    for (LeafNode *leaf = leaf_og; leaf != nullptr; leaf = leaf->right_) {
-      for (uint16_t i = 0; i < leaf->size_; i++) {
-        if (leaf->IsReadable(i)) {
-          return {leaf, i};
-        }
-      }
-      leaf_og = leaf;
-    }
-    return {leaf_og, leaf_og->size_ - 1, true, false};
+    return static_cast<LeafNode *>(n);
   }
 
-  BPlusTreeIterator Begin(KeyType key) {
-    BaseNode *n = this->root_;
-
+  LeafNode* FindMinLeaf(KeyType key) {
+    BaseNode *n = root_;
     while (n->GetType() != NodeType::LEAF) {
-      auto *inner_n = static_cast<InnerNode *>(n);
-      n = inner_n->children_[inner_n->FindMinChild(key)];
-      TERRIER_ASSERT(n != nullptr, "child of inner node should be non-null");
+      InnerNode *inner_n = static_cast<InnerNode *>(n);
+      uint16_t child_index = inner_n->FindMinChild(key);
+      n = inner_n->children_[child_index];
     }
-
-    auto leaf_og = static_cast<LeafNode *>(n);
-    for (LeafNode *leaf = leaf_og; leaf != nullptr; leaf = leaf->right_) {
-      for (uint16_t i = 0; i < leaf->size_; i++) {
-        if (leaf->IsReadable(i) && KeyCmpGreaterEqual(key, leaf->keys_[i])) {
-          return {leaf, i};
-        }
-      }
-      leaf_og = leaf;
-    }
-    return {leaf_og, leaf_og->size_ - 1, true, false};
+    return static_cast<LeafNode *>(n);
   }
 
-  BPlusTreeIterator RBegin() {
-    BaseNode *n = this->root_;
+  LeafNode* FindMaxLeaf() {
+    BaseNode *n = root_;
     while (n->GetType() != NodeType::LEAF) {
-      auto *inner_n = static_cast<InnerNode *>(n);
+      InnerNode *inner_n = static_cast<InnerNode *>(n);
       n = inner_n->children_[inner_n->size_];
-      TERRIER_ASSERT(n != nullptr, "child of inner node should be non-null");
     }
-
-    auto leaf_og = static_cast<LeafNode *>(n);
-    for (LeafNode *leaf = leaf_og; leaf != nullptr; leaf = leaf->left_) {
-      for (uint16_t i = leaf->size_ - 1; i < leaf->size_; i--) {
-        if (leaf->IsReadable(i)) {
-          return {leaf, i};
-        }
-      }
-      leaf_og = leaf;
-    }
-    return {leaf_og, 0, false, true};
+    return static_cast<LeafNode *>(n);
   }
 
-  BPlusTreeIterator RBegin(KeyType key) {
-    BaseNode *n = this->root_;
+  LeafNode* FindMaxLeaf(KeyType key) {
+    BaseNode *n = root_;
     while (n->GetType() != NodeType::LEAF) {
-      auto *inner_n = static_cast<InnerNode *>(n);
+      InnerNode *inner_n = static_cast<InnerNode *>(n);
       n = inner_n->FindMaxChild(key);
-      TERRIER_ASSERT(n != nullptr, "child of inner node should be non-null");
     }
-
-    auto leaf_og = static_cast<LeafNode *>(n);
-    for (LeafNode *leaf = leaf_og; leaf != nullptr; leaf = leaf->left_) {
-      for (uint16_t i = leaf->size_ - 1; i < leaf->size_; i--) {
-        if (leaf->IsReadable(i) && KeyCmpLessEqual(key, leaf->keys_[i])) {
-          return {leaf, i};
-        }
-      }
-      leaf_og = leaf;
-    }
-    return {leaf_og, 0, false, true};
+    return static_cast<LeafNode *>(n);
   }
-  BPlusTreeIterator End() { return END; }
-  BPlusTreeIterator REnd() { return REND; }
-  bool FastEnd() { return true; }
-  char FastREnd() { return 0x0; }
 
   void LatchRoot() {
-    while (!root_latch_.compare_exchange_strong(false, true)) {}
+    bool t = true;
+    bool f = false;
+    while (!root_latch_.compare_exchange_strong(f, t)) {}
   }
 
   void UnlatchRoot() { root_latch_ = false; }
@@ -903,8 +770,6 @@ class BPlusTree {
   std::atomic<bool> root_latch_;
   std::atomic<BaseNode *> root_;
   std::atomic<uint64_t> structure_size_;
-  const BPlusTreeIterator END = {true};
-  const BPlusTreeIterator REND = {false};
 };
 
 }  // namespace terrier::storage::index

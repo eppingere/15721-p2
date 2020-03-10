@@ -172,16 +172,29 @@ class BPlusTreeIndex final : public Index {
     if (low_key_exists) index_low_key.SetFromProjectedRow(*low_key, metadata_, num_attrs);
     if (high_key_exists) index_high_key.SetFromProjectedRow(*high_key, metadata_, num_attrs);
 
-    // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
-    // Perform lookup in BwTree
-    auto scan_itr = low_key_exists ? bplustree_->Begin(index_low_key) : bplustree_->Begin();
 
-    // Limit of 0 indicates "no limit"
-    while ((limit == 0 || value_list->size() < limit) && scan_itr != bplustree_->FastEnd() &&
-           (!high_key_exists || scan_itr.GetKey().PartialLessThan(index_high_key, &metadata_, num_attrs))) {
-      // Perform visibility check on result
-      if (IsVisible(txn, scan_itr.GetValue())) value_list->emplace_back(scan_itr.GetValue());
-      ++scan_itr;
+    void *leaf_ptr;
+    if (low_key_exists) {
+      leaf_ptr = bplustree_->FindMinLeaf(index_low_key);
+    } else {
+      leaf_ptr = bplustree_->FindMinLeaf();
+    }
+    auto *leaf = static_cast<typename BPlusTree<KeyType, TupleSlot>::LeafNode *>(leaf_ptr);
+
+    // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
+    bool done = false;
+    for (; !done && (limit == 0 || value_list->size() < limit) && leaf != nullptr; leaf = leaf->right_) {
+      for (uint16_t i = 0; i < leaf->size_; i++) {
+        if (leaf->IsReadable(i)) {
+          if (IsVisible(txn, leaf->values_[i]) &&
+            (!high_key_exists || leaf->keys_[i].PartialLessThan(index_high_key, &metadata_, num_attrs)) &&
+            (!low_key_exists || index_low_key.PartialLessThan(leaf->keys_[i], &metadata_, num_attrs)))
+              value_list->emplace_back(leaf->values_[i]);
+          else if (high_key_exists && !leaf->keys_[i].PartialLessThan(index_high_key, &metadata_, num_attrs)) {
+            done = true;
+          }
+        }
+      }
     }
   }
 
@@ -196,13 +209,7 @@ class BPlusTreeIndex final : public Index {
 
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
     // Perform lookup in BwTree
-    auto scan_itr = bplustree_->RBegin(index_high_key);
-
-    while (scan_itr != bplustree_->FastREnd() && (bplustree_->KeyCmpGreaterEqual(scan_itr.GetKey(), index_low_key))) {
-      // Perform visibility check on result
-      if (IsVisible(txn, scan_itr.GetValue())) value_list->emplace_back(scan_itr.GetValue());
-      --scan_itr;
-    }
+    bplustree_->ScanDescending(index_low_key, index_high_key, value_list);
   }
 
   void ScanLimitDescending(const transaction::TransactionContext &txn, const ProjectedRow &low_key,
@@ -218,14 +225,7 @@ class BPlusTreeIndex final : public Index {
 
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
 
-    auto scan_itr = bplustree_->RBegin(index_high_key);
-
-    while (value_list->size() < limit && scan_itr != bplustree_->FastREnd() &&
-           (bplustree_->KeyCmpGreaterEqual(scan_itr.GetKey(), index_low_key))) {
-      // Perform visibility check on result
-      if (IsVisible(txn, scan_itr.GetValue())) value_list->emplace_back(scan_itr.GetValue());
-      --scan_itr;
-    }
+    bplustree_->ScanDescendingLimit(index_low_key, index_high_key, limit, value_list);
   }
 };
 
