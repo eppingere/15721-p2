@@ -71,7 +71,7 @@ class BPlusTree {
       : key_cmp_obj_{p_key_cmp_obj},
         key_eq_obj_{p_key_eq_obj},
         value_eq_obj_{p_value_eq_obj},
-        epoch_(0),
+        epoch_(1),
         structure_size_{sizeof(LeafNode)} {
     root_ = static_cast<BaseNode *>(new LeafNode(this));
   }
@@ -443,6 +443,7 @@ class BPlusTree {
         return true;
       }
 
+      // TODO(deepayan): see if insert to the right works out instead of forcing split here
       if (this->size_ >= this->limit_) {
         return false;
       }
@@ -769,7 +770,8 @@ class BPlusTree {
       auto inner_n = static_cast<InnerNode *>(n);
       n->GetWriteLatch();
       if (n->size_ < n->limit_) {
-        if (holds_tree_latch && locked_index != 0) {
+        if (holds_tree_latch && locked_nodes.size() > 1) {
+          TERRIER_ASSERT(locked_index == 0, "index should still be 0 if you have tree latch");
           UnlatchRoot();
           holds_tree_latch = false;
         }
@@ -835,6 +837,7 @@ class BPlusTree {
       return this->KeyCmpLess(a.first, b.first);
     });
 
+    // TODO(deepayan): check if this actually is hit and sorts
     // Determine keys and values to stay in current leaf and copy others to new leaf
     uint16_t left_size = kvps.size() / 2;
     uint16_t i;
@@ -842,7 +845,7 @@ class BPlusTree {
       new_leaf_left->keys_[i] = kvps[i].first;
       new_leaf_left->values_[i] = kvps[i].second;
     }
-    for (i = left_size; i < leaf->size_; i++) {
+    for (i = left_size; i < kvps.size(); i++) {
       new_leaf_right->keys_[i - left_size] = kvps[i].first;
       new_leaf_right->values_[i - left_size] = kvps[i].second;
     }
@@ -851,7 +854,7 @@ class BPlusTree {
     KeyType new_key = new_leaf_right->keys_[0];
 
     // Update sizes of current and newly created leaf
-    new_leaf_right->size_ = leaf->size_ - left_size;
+    new_leaf_right->size_ = kvps.size() - left_size;
     new_leaf_left->size_ = left_size;
 
     // Update neighbor pointers for leaf nodes
@@ -873,8 +876,9 @@ class BPlusTree {
 
     // If split is on root (leaf)
     if (UNLIKELY(locked_nodes.empty())) {
-      TERRIER_ASSERT(leaf == root_ && holds_tree_latch,
-                     "somehow we had to split a leaf without having to modify the parent");
+      TERRIER_ASSERT(leaf == root_, "we had to split a leaf without having to modify the parent");
+      TERRIER_ASSERT(holds_tree_latch,
+                     "we are trying to split the root without a latch on the tree");
       // Create new root and update attributes for new root and tree
       auto new_root = new InnerNode(this);
       new_root->keys_[0] = new_key;
@@ -1152,9 +1156,13 @@ class BPlusTree {
     bool t = true;
     bool f = false;
     while (!root_latch_.compare_exchange_strong(f, t)) {}
+    TERRIER_ASSERT(root_latch_, "root latch should be held");
   }
 
-  void UnlatchRoot() { root_latch_ = false; }
+  void UnlatchRoot() {
+    TERRIER_ASSERT(root_latch_, "root latch should be held");
+    root_latch_ = false;
+  }
 
   std::atomic<uint64_t> active_epochs_[MAX_NUM_ACTIVE_EPOCHS] = {};
 //  InnerNodeAllocator inner_node_allocator_ = InnerNodeAllocator(ALLOCATOR_START_SIZE, this);
