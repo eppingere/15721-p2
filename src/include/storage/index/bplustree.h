@@ -73,7 +73,7 @@ class BPlusTree {
         value_eq_obj_{p_value_eq_obj},
         epoch_(0),
         structure_size_{sizeof(LeafNode)} {
-    root_ = static_cast<BaseNode *>(this->leaf_node_allocator_.NewNode());
+    root_ = static_cast<BaseNode *>(new LeafNode(this));
   }
 
   // Key comparator, and key and value equality checker
@@ -194,7 +194,7 @@ class BPlusTree {
 
   class InnerNode : public BaseNode {
    public:
-    InnerNode() {}
+    InnerNode() = default;
 
     InnerNode(BPlusTree *tree) : BaseNode(tree, NodeType::INNER_NODE) {}
     ~InnerNode() = default;
@@ -384,7 +384,7 @@ class BPlusTree {
 
   class LeafNode : public BaseNode {
    public:
-    LeafNode() {}
+    LeafNode() = default;
 
     LeafNode(BPlusTree *tree) : BaseNode(tree, NodeType::LEAF), left_(nullptr), right_(nullptr) {}
     ~LeafNode() = default;
@@ -508,211 +508,211 @@ class BPlusTree {
     ValueType values_[LEAF_SIZE] = {};
   };
 
-  class InnerNodeAllocator {
-    static const uint64_t ALLOCATOR_ARRAY_SIZE = 64;
+//  class InnerNodeAllocator {
+//    static const uint64_t ALLOCATOR_ARRAY_SIZE = 64;
+//
+//    class InnerNodeAllocatorArray {
+//     public:
+//      InnerNodeAllocatorArray(BPlusTree<KeyType, ValueType> *tree) {
+//        for (uint64_t i = 0; i < ALLOCATOR_ARRAY_SIZE; i++) {
+//          new (&(array_[i])) InnerNode(tree);
+//        }
+//      }
+//
+//      bool Allocate(uint64_t i) {
+//        while (true) {
+//          uint64_t old_value = allocated_masks_[i / BITS_IN_UINT64];
+//          uint64_t new_value =
+//              allocated_masks_[i / BITS_IN_UINT64] | (static_cast<uint64_t>(0x1) << (i % BITS_IN_UINT64));
+//          uint64_t available = old_value >> (i % BITS_IN_UINT64);
+//          if (!static_cast<bool>(available & static_cast<uint64_t>(0x1))) return false;
+//          if (!allocated_masks_[i / BITS_IN_UINT64].compare_exchange_strong(old_value, new_value)) continue;
+//          return true;
+//        }
+//      }
+//
+//      bool IsAvailable(uint64_t i) {
+//        uint64_t old_value = allocated_masks_[i / BITS_IN_UINT64];
+//        return !static_cast<bool>((old_value >> (i % BITS_IN_UINT64)) & static_cast<uint64_t>(0x1));
+//      }
+//
+//      void Reclaim(uint64_t i) {
+//        while (true) {
+//          uint64_t old_value = allocated_masks_[i / BITS_IN_UINT64];
+//          uint64_t new_value =
+//              allocated_masks_[i / BITS_IN_UINT64] | (static_cast<uint64_t>(0x1) << (i % BITS_IN_UINT64));
+//          if (!allocated_masks_[i / BITS_IN_UINT64].compare_exchange_strong(old_value, new_value)) continue;
+//          return;
+//        }
+//      }
+//
+//      std::atomic<uint64_t> allocated_masks_[(ALLOCATOR_ARRAY_SIZE + BITS_IN_UINT64 - 1) / BITS_IN_UINT64] = {};
+//      LeafNode array_[ALLOCATOR_ARRAY_SIZE];
+//    };
+//
+//    void ReclaimOldNodes(uint64_t safe_to_delete_epoch) {
+//      while (!resizing_.compare_exchange_strong(false, true)) {}
+//      for (uint64_t i = 0; i < size_; i++) {
+//        for (uint64_t j = 0; j < ALLOCATOR_ARRAY_SIZE; j++) {
+//          if (!table_[i]->IsAvailable(j)) {
+//            BaseNode node = static_cast<BaseNode>(table_[i]->array_[j]);
+//            if (node.deleted_ && node.deleted_epoch_ <= safe_to_delete_epoch) {
+//              table_[i]->Reclaim(j);
+//            }
+//          }
+//        }
+//      }
+//    }
+//
+//   public:
+//    InnerNodeAllocator(uint64_t starting_size, BPlusTree<KeyType, ValueType> *tree) :
+//        tree_(tree),
+//        resizing_(false),
+//        size_((starting_size + ALLOCATOR_ARRAY_SIZE - 1) / ALLOCATOR_ARRAY_SIZE),
+//        table_(new InnerNodeAllocatorArray*[(starting_size + ALLOCATOR_ARRAY_SIZE - 1) / ALLOCATOR_ARRAY_SIZE]) {
+//      for (uint64_t i = 0; i < (starting_size + ALLOCATOR_ARRAY_SIZE - 1) / ALLOCATOR_ARRAY_SIZE; i++) {
+//        table_[i] = new InnerNodeAllocatorArray(tree_);
+//      }
+//    }
+//
+//    InnerNode* NewNode() {
+//      do {
+//        for (uint64_t i = 0; i < size_; i++) {
+//          uint64_t j;
+//          for (j = 0; j < ALLOCATOR_ARRAY_SIZE && !table_[i]->Allocate(j); j++) {}
+//          if (j != ALLOCATOR_ARRAY_SIZE) {
+//            InnerNode *node = table_[i]->array_ + j;
+//            node->Reallocate();
+//            return (table_[i]->array_ + j);
+//          }
+//        }
+//      } while (resizing_);
+//
+//      while (!resizing_.compare_exchange_strong(false, true)) {}
+//      InnerNodeAllocatorArray ** new_table = new InnerNodeAllocatorArray*[2 * size_];
+//      for (uint64_t i = 0; i < size_; i++) {
+//        new_table[i] = table_[i];
+//      }
+//
+//      for (uint64_t i = size_; i < 2 * size_; i++) {
+//        new_table[i] = new InnerNodeAllocatorArray();
+//      }
+//
+//      InnerNodeAllocatorArray ** old_table = table_;
+//      table_ = new_table;
+//      resizing_ = false;
+//      delete old_table;
+//    }
+//
+//   private:
+//    BPlusTree<KeyType, ValueType> *tree_;
+//    std::atomic<bool> resizing_;
+//    std::atomic<uint64_t> size_;
+//    std::atomic<InnerNodeAllocatorArray **> table_;
+//  };
 
-    class InnerNodeAllocatorArray {
-     public:
-      InnerNodeAllocatorArray(BPlusTree<KeyType, ValueType> *tree) {
-        for (uint64_t i = 0; i < ALLOCATOR_ARRAY_SIZE; i++) {
-          array_[i] = std::move(InnerNode(tree));
-        }
-      }
-
-      bool Allocate(uint64_t i) {
-        while (true) {
-          uint64_t old_value = allocated_masks_[i / BITS_IN_UINT64];
-          uint64_t new_value =
-              allocated_masks_[i / BITS_IN_UINT64] | (static_cast<uint64_t>(0x1) << (i % BITS_IN_UINT64));
-          uint64_t available = old_value >> (i % BITS_IN_UINT64);
-          if (!static_cast<bool>(available & static_cast<uint64_t>(0x1))) return false;
-          if (!allocated_masks_[i / BITS_IN_UINT64].compare_exchange_strong(old_value, new_value)) continue;
-          return true;
-        }
-      }
-
-      bool IsAvailable(uint64_t i) {
-        uint64_t old_value = allocated_masks_[i / BITS_IN_UINT64];
-        return !static_cast<bool>((old_value >> (i % BITS_IN_UINT64)) & static_cast<uint64_t>(0x1));
-      }
-
-      void Reclaim(uint64_t i) {
-        while (true) {
-          uint64_t old_value = allocated_masks_[i / BITS_IN_UINT64];
-          uint64_t new_value =
-              allocated_masks_[i / BITS_IN_UINT64] | (static_cast<uint64_t>(0x1) << (i % BITS_IN_UINT64));
-          if (!allocated_masks_[i / BITS_IN_UINT64].compare_exchange_strong(old_value, new_value)) continue;
-          return;
-        }
-      }
-
-      std::atomic<uint64_t> allocated_masks_[(ALLOCATOR_ARRAY_SIZE + BITS_IN_UINT64 - 1) / BITS_IN_UINT64] = {};
-      LeafNode array_[ALLOCATOR_ARRAY_SIZE];
-    };
-
-    void ReclaimOldNodes(uint64_t safe_to_delete_epoch) {
-      while (!resizing_.compare_exchange_strong(false, true)) {}
-      for (uint64_t i = 0; i < size_; i++) {
-        for (uint64_t j = 0; j < ALLOCATOR_ARRAY_SIZE; j++) {
-          if (!table_[i]->IsAvailable(j)) {
-            BaseNode node = static_cast<BaseNode>(table_[i]->array_[j]);
-            if (node.deleted_ && node.deleted_epoch_ <= safe_to_delete_epoch) {
-              table_[i]->Reclaim(j);
-            }
-          }
-        }
-      }
-    }
-
-   public:
-    InnerNodeAllocator(uint64_t starting_size, BPlusTree<KeyType, ValueType> *tree) :
-        tree_(tree),
-        resizing_(false),
-        size_((starting_size + ALLOCATOR_ARRAY_SIZE - 1) / ALLOCATOR_ARRAY_SIZE),
-        table_(new InnerNodeAllocatorArray*[(starting_size + ALLOCATOR_ARRAY_SIZE - 1) / ALLOCATOR_ARRAY_SIZE]) {
-      for (uint64_t i = 0; i < (starting_size + ALLOCATOR_ARRAY_SIZE - 1) / ALLOCATOR_ARRAY_SIZE; i++) {
-        table_[i] = new InnerNodeAllocatorArray(tree_);
-      }
-    }
-
-    InnerNode* NewNode() {
-      do {
-        for (uint64_t i = 0; i < size_; i++) {
-          uint64_t j;
-          for (j = 0; j < ALLOCATOR_ARRAY_SIZE && !table_[i]->Allocate(j); j++) {}
-          if (j != ALLOCATOR_ARRAY_SIZE) {
-            InnerNode *node = table_[i]->array_ + j;
-            node->Reallocate();
-            return (table_[i]->array_ + j);
-          }
-        }
-      } while (resizing_);
-
-      while (!resizing_.compare_exchange_strong(false, true)) {}
-      InnerNodeAllocatorArray ** new_table = new InnerNodeAllocatorArray*[2 * size_];
-      for (uint64_t i = 0; i < size_; i++) {
-        new_table[i] = table_[i];
-      }
-
-      for (uint64_t i = size_; i < 2 * size_; i++) {
-        new_table[i] = new InnerNodeAllocatorArray();
-      }
-
-      InnerNodeAllocatorArray ** old_table = table_;
-      table_ = new_table;
-      resizing_ = false;
-      delete old_table;
-    }
-
-   private:
-    BPlusTree<KeyType, ValueType> *tree_;
-    std::atomic<bool> resizing_;
-    std::atomic<uint64_t> size_;
-    std::atomic<InnerNodeAllocatorArray **> table_;
-  };
-
-  class LeafNodeAllocator {
-    static const uint64_t ALLOCATOR_ARRAY_SIZE = 64;
-
-    class LeafNodeAllocatorArray {
-     public:
-      LeafNodeAllocatorArray(BPlusTree<KeyType, ValueType> tree) {
-        for (uint64_t i = 0; i < ALLOCATOR_ARRAY_SIZE; i++) {
-          array_[i] = std::move(LeafNode(tree));
-        }
-      }
-
-      bool Allocate(uint64_t i) {
-        while (true) {
-          uint64_t old_value = allocated_masks_[i / BITS_IN_UINT64];
-          uint64_t new_value =
-              allocated_masks_[i / BITS_IN_UINT64] | (static_cast<uint64_t>(0x1) << (i % BITS_IN_UINT64));
-          uint64_t available = old_value >> (i % BITS_IN_UINT64);
-          if (!static_cast<bool>(available & static_cast<uint64_t>(0x1))) return false;
-          if (!allocated_masks_[i / BITS_IN_UINT64].compare_exchange_strong(old_value, new_value)) continue;
-          return true;
-        }
-      }
-
-      bool IsAvailable(uint64_t i) {
-        uint64_t old_value = allocated_masks_[i / BITS_IN_UINT64];
-        return !static_cast<bool>((old_value >> (i % BITS_IN_UINT64)) & static_cast<uint64_t>(0x1));
-      }
-
-      void Reclaim(uint64_t i) {
-        while (true) {
-          uint64_t old_value = allocated_masks_[i / BITS_IN_UINT64];
-          uint64_t new_value =
-              allocated_masks_[i / BITS_IN_UINT64] | (static_cast<uint64_t>(0x1) << (i % BITS_IN_UINT64));
-          if (!allocated_masks_[i / BITS_IN_UINT64].compare_exchange_strong(old_value, new_value)) continue;
-          return;
-        }
-      }
-
-      std::atomic<uint64_t> allocated_masks_[(ALLOCATOR_ARRAY_SIZE + BITS_IN_UINT64 - 1) / BITS_IN_UINT64] = {};
-      LeafNode array_[ALLOCATOR_ARRAY_SIZE];
-    };
-
-    void ReclaimOldNodes(uint64_t safe_to_delete_epoch) {
-      while (!resizing_.compare_exchange_strong(false, true)) {}
-      for (uint64_t i = 0; i < size_; i++) {
-        for (uint64_t j = 0; j < ALLOCATOR_ARRAY_SIZE; j++) {
-          if (!table_[i]->IsAvailable(j)) {
-            BaseNode node = static_cast<BaseNode>(table_[i]->array_[j]);
-            if (node.deleted_ && node.deleted_epoch_ <= safe_to_delete_epoch) {
-              table_[i]->Reclaim(j);
-            }
-          }
-        }
-      }
-    }
-
-   public:
-    LeafNodeAllocator(uint64_t starting_size, BPlusTree<KeyType, ValueType> *tree) :
-        tree_(tree),
-        resizing_(false),
-        size_((starting_size + ALLOCATOR_ARRAY_SIZE - 1) / ALLOCATOR_ARRAY_SIZE),
-        table_(new LeafNodeAllocatorArray*[(starting_size + ALLOCATOR_ARRAY_SIZE - 1) / ALLOCATOR_ARRAY_SIZE]) {
-      for (uint64_t i = 0; i < (starting_size + ALLOCATOR_ARRAY_SIZE - 1) / ALLOCATOR_ARRAY_SIZE; i++) {
-        table_[i] = new LeafNodeAllocatorArray();
-      }
-    }
-
-    LeafNode* NewNode() {
-      do {
-        for (uint64_t i = 0; i < size_; i++) {
-          uint64_t j;
-          for (j = 0; j < ALLOCATOR_ARRAY_SIZE && !table_[i]->Allocate(j); j++) {}
-          if (j != ALLOCATOR_ARRAY_SIZE) {
-            LeafNode *node = table_[i]->array_ + j;
-            node->Reallocate();
-            return (table_[i]->array_ + j);
-          }
-        }
-      } while (resizing_);
-
-      while (!resizing_.compare_exchange_strong(false, true)) {}
-      LeafNodeAllocatorArray ** new_table = new LeafNodeAllocatorArray*[2 * size_];
-      for (uint64_t i = 0; i < size_; i++) {
-        new_table[i] = table_[i];
-      }
-
-      for (uint64_t i = size_; i < 2 * size_; i++) {
-        new_table[i] = new LeafNodeAllocatorArray();
-      }
-
-      LeafNodeAllocatorArray ** old_table = table_;
-      table_ = new_table;
-      resizing_ = false;
-      delete old_table;
-    }
-
-   private:
-    BPlusTree<KeyType, ValueType> *tree_;
-    std::atomic<bool> resizing_;
-    std::atomic<uint64_t> size_;
-    std::atomic<LeafNodeAllocatorArray **> table_;
-  };
+//  class LeafNodeAllocator {
+//    static const uint64_t ALLOCATOR_ARRAY_SIZE = 64;
+//
+//    class LeafNodeAllocatorArray {
+//     public:
+//      LeafNodeAllocatorArray(BPlusTree<KeyType, ValueType> tree) {
+//        for (uint64_t i = 0; i < ALLOCATOR_ARRAY_SIZE; i++) {
+//          new (&(array_[i])) LeafNode(tree);
+//        }
+//      }
+//
+//      bool Allocate(uint64_t i) {
+//        while (true) {
+//          uint64_t old_value = allocated_masks_[i / BITS_IN_UINT64];
+//          uint64_t new_value =
+//              allocated_masks_[i / BITS_IN_UINT64] | (static_cast<uint64_t>(0x1) << (i % BITS_IN_UINT64));
+//          uint64_t available = old_value >> (i % BITS_IN_UINT64);
+//          if (!static_cast<bool>(available & static_cast<uint64_t>(0x1))) return false;
+//          if (!allocated_masks_[i / BITS_IN_UINT64].compare_exchange_strong(old_value, new_value)) continue;
+//          return true;
+//        }
+//      }
+//
+//      bool IsAvailable(uint64_t i) {
+//        uint64_t old_value = allocated_masks_[i / BITS_IN_UINT64];
+//        return !static_cast<bool>((old_value >> (i % BITS_IN_UINT64)) & static_cast<uint64_t>(0x1));
+//      }
+//
+//      void Reclaim(uint64_t i) {
+//        while (true) {
+//          uint64_t old_value = allocated_masks_[i / BITS_IN_UINT64];
+//          uint64_t new_value =
+//              allocated_masks_[i / BITS_IN_UINT64] | (static_cast<uint64_t>(0x1) << (i % BITS_IN_UINT64));
+//          if (!allocated_masks_[i / BITS_IN_UINT64].compare_exchange_strong(old_value, new_value)) continue;
+//          return;
+//        }
+//      }
+//
+//      std::atomic<uint64_t> allocated_masks_[(ALLOCATOR_ARRAY_SIZE + BITS_IN_UINT64 - 1) / BITS_IN_UINT64] = {};
+//      LeafNode array_[];
+//    };
+//
+//    void ReclaimOldNodes(uint64_t safe_to_delete_epoch) {
+//      while (!resizing_.compare_exchange_strong(false, true)) {}
+//      for (uint64_t i = 0; i < size_; i++) {
+//        for (uint64_t j = 0; j < ALLOCATOR_ARRAY_SIZE; j++) {
+//          if (!table_[i]->IsAvailable(j)) {
+//            BaseNode node = static_cast<BaseNode>(table_[i]->array_[j]);
+//            if (node.deleted_ && node.deleted_epoch_ <= safe_to_delete_epoch) {
+//              table_[i]->Reclaim(j);
+//            }
+//          }
+//        }
+//      }
+//    }
+//
+//   public:
+//    LeafNodeAllocator(uint64_t starting_size, BPlusTree<KeyType, ValueType> *tree) :
+//        tree_(tree),
+//        resizing_(false),
+//        size_((starting_size + ALLOCATOR_ARRAY_SIZE - 1) / ALLOCATOR_ARRAY_SIZE),
+//        table_(new LeafNodeAllocatorArray[(starting_size + ALLOCATOR_ARRAY_SIZE - 1) / ALLOCATOR_ARRAY_SIZE]) {
+//      for (uint64_t i = 0; i < (starting_size + ALLOCATOR_ARRAY_SIZE - 1) / ALLOCATOR_ARRAY_SIZE; i++) {
+//        new (&table_[i]) LeafNodeAllocatorArray(tree);
+//      }
+//    }
+//
+//    LeafNode* NewNode() {
+//      do {
+//        for (uint64_t i = 0; i < size_; i++) {
+//          uint64_t j;
+//          for (j = 0; j < ALLOCATOR_ARRAY_SIZE && !table_[i]->Allocate(j); j++) {}
+//          if (j != ALLOCATOR_ARRAY_SIZE) {
+//            LeafNode *node = table_[i]->array_ + j;
+//            node->Reallocate();
+//            return (table_[i]->array_ + j);
+//          }
+//        }
+//      } while (resizing_);
+//
+//      while (!resizing_.compare_exchange_strong(false, true)) {}
+//      LeafNodeAllocatorArray ** new_table = new LeafNodeAllocatorArray*[2 * size_];
+//      for (uint64_t i = 0; i < size_; i++) {
+//        new_table[i] = table_[i];
+//      }
+//
+//      for (uint64_t i = size_; i < 2 * size_; i++) {
+//        new (&table_[i]) LeafNodeAllocatorArray(this->tree);
+//      }
+//
+//      LeafNodeAllocatorArray ** old_table = table_;
+//      table_ = new_table;
+//      resizing_ = false;
+//      delete old_table;
+//    }
+//
+//   private:
+//    BPlusTree<KeyType, ValueType> *tree_;
+//    std::atomic<bool> resizing_;
+//    std::atomic<uint64_t> size_;
+//    std::atomic<LeafNodeAllocatorArray *> table_;
+//  };
 
   void ReclaimOldNodes() {
     uint64_t old_epoch = epoch_;
@@ -722,14 +722,14 @@ class BPlusTree {
          iter < MAX_NUM_ACTIVE_EPOCHS - 1 && active_epochs_[(old_epoch + iter) % MAX_NUM_ACTIVE_EPOCHS] == 0;
          iter++) {}
 
-    uint64_t safe_iter = iter - 1;
-    uint64_t safe_to_delete_epoch = epoch_ + safe_iter < MAX_NUM_ACTIVE_EPOCHS ? 0 :
-                                    epoch_ + safe_iter - MAX_NUM_ACTIVE_EPOCHS;
+//    uint64_t safe_iter = iter - 1;
+//    uint64_t safe_to_delete_epoch = epoch_ + safe_iter < MAX_NUM_ACTIVE_EPOCHS ? 0 :
+//                                    epoch_ + safe_iter - MAX_NUM_ACTIVE_EPOCHS;
 
     epoch_++;
 
-    inner_node_allocator_.ReclaimOldNodes(safe_to_delete_epoch);
-    leaf_node_allocator_.ReclaimOldNodes(safe_to_delete_epoch);
+//    inner_node_allocator_.ReclaimOldNodes(safe_to_delete_epoch);
+//    leaf_node_allocator_.ReclaimOldNodes(safe_to_delete_epoch);
   }
 
   void RunGarbageCollection() {
@@ -822,8 +822,8 @@ class BPlusTree {
     }
 
     // Otherwise must split so create new leaf
-    LeafNode* new_leaf_right = this->leaf_node_allocator_.NewNode();
-    LeafNode* new_leaf_left = this->leaf_node_allocator_.NewNode();
+    LeafNode* new_leaf_right = new LeafNode(this);
+    LeafNode* new_leaf_left = new LeafNode(this);
 
     std::vector<std::pair<KeyType, ValueType>> kvps;
     kvps.emplace_back(std::pair<KeyType, ValueType>(key, val));
@@ -876,7 +876,7 @@ class BPlusTree {
       TERRIER_ASSERT(leaf == root_ && holds_tree_latch,
                      "somehow we had to split a leaf without having to modify the parent");
       // Create new root and update attributes for new root and tree
-      auto new_root = this->inner_node_allocator_.NewNode();
+      auto new_root = new InnerNode(this);
       new_root->keys_[0] = new_key;
       new_root->children_[0] = new_leaf_left;
       new_root->children_[1] = new_leaf_right;
@@ -900,8 +900,8 @@ class BPlusTree {
         break;
       }
 
-      new_node_left = this->leaf_node_allocator_.NewNode();
-      new_node_right = this->leaf_node_allocator_.NewNode();
+      new_node_left = new InnerNode(this);
+      new_node_right = new InnerNode(this);
       for (i = 0; i < old_node->size_; i++) {
         new_node_left->keys_[i] = old_node->keys_[i];
         new_node_left->children_[i] = old_node->children_[i].load();
@@ -941,7 +941,7 @@ class BPlusTree {
 
     if (old_node->size_ < old_node->limit_) {
       TERRIER_ASSERT(old_node->write_latch, "must hold write latch if not full");
-      InnerNode* new_node = this->leaf_node_allocator_.NewNode();
+      InnerNode* new_node = new InnerNode(this);
       new_node->size_ = old_node->size_.load();
       for (i = 0; i < old_node->size_; i++) {
         new_node->keys_[i] = old_node->keys_[i];
@@ -978,7 +978,7 @@ class BPlusTree {
     } else {
       TERRIER_ASSERT(locked_nodes.empty() && old_node == root_ && holds_tree_latch,
           "we should have split all the way to the top");
-      auto new_root = this->leaf_node_allocator_.NewNode();
+      auto new_root = new InnerNode(this);
       new_root->keys_[0] = new_key;
       new_root->children_[0] = new_child_left;
       new_root->children_[1] = new_child_right;
@@ -1157,8 +1157,8 @@ class BPlusTree {
   void UnlatchRoot() { root_latch_ = false; }
 
   std::atomic<uint64_t> active_epochs_[MAX_NUM_ACTIVE_EPOCHS] = {};
-  InnerNodeAllocator inner_node_allocator_ = InnerNodeAllocator(ALLOCATOR_START_SIZE, this);
-  LeafNodeAllocator leaf_node_allocator_ = LeafNodeAllocator(ALLOCATOR_START_SIZE, this);
+//  InnerNodeAllocator inner_node_allocator_ = InnerNodeAllocator(ALLOCATOR_START_SIZE, this);
+//  LeafNodeAllocator leaf_node_allocator_ = LeafNodeAllocator(ALLOCATOR_START_SIZE, this);
   std::atomic<uint64_t> epoch_ = 1;
   std::atomic<bool> root_latch_;
   std::atomic<BaseNode *> root_;
