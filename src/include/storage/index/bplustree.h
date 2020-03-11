@@ -775,7 +775,7 @@ class BPlusTree {
           UnlatchRoot();
           holds_tree_latch = false;
         }
-        for (; !locked_nodes.empty() && locked_index < locked_nodes.size() - 1; locked_index++) {
+        for (; !locked_nodes.empty() && locked_nodes.size() - locked_index > 1; locked_index++) {
           locked_nodes[locked_index]->ReleaseWriteLatch();
         }
       }
@@ -790,6 +790,7 @@ class BPlusTree {
     if (leaf->InsertLeaf(key, val, predicate, predicate_satisfied) || *predicate_satisfied) {
       if (holds_tree_latch) {
         UnlatchRoot();
+        holds_tree_latch = false;
       }
       for (; locked_index < locked_nodes.size(); locked_index++) {
         locked_nodes[locked_index]->ReleaseWriteLatch();
@@ -890,6 +891,7 @@ class BPlusTree {
       old_root->MarkDeleted();
       old_root->ReleaseWriteLatch();
       UnlatchRoot();
+      holds_tree_latch = false;
       return true;
     }
 
@@ -897,9 +899,12 @@ class BPlusTree {
     auto new_child_left = static_cast<BaseNode *>(new_leaf_left);
     auto new_child_right = static_cast<BaseNode *>(new_leaf_right);
 
+    uint64_t locked_size = locked_nodes.size();
+    uint64_t num_popped = 0;
     while (!locked_nodes.empty()) {
       old_node = locked_nodes.back();
       locked_nodes.pop_back();
+      num_popped++;
       if (old_node->size_ < old_node->limit_) {
         break;
       }
@@ -942,7 +947,7 @@ class BPlusTree {
       old_node->ReleaseWriteLatch();
     }
 
-
+    int which_case = 0;
     if (old_node->size_ < old_node->limit_) {
       TERRIER_ASSERT(old_node->write_latch, "must hold write latch if not full");
       InnerNode* new_node = new InnerNode(this);
@@ -964,11 +969,14 @@ class BPlusTree {
       old_node->ReleaseWriteLatch();
 
       if (old_node == root_) {
+        which_case = 1;
         TERRIER_ASSERT(holds_tree_latch && locked_nodes.empty(),
             "must hold tree latch if held latch on root");
         root_ = new_node;
         UnlatchRoot();
+        holds_tree_latch = false;
       } else {
+        which_case = 2;
         TERRIER_ASSERT(!holds_tree_latch || !locked_nodes.empty(),
                        "if we are not at the root then we should not hold the tree latch"
                        "and should have released some write latches");
@@ -976,10 +984,17 @@ class BPlusTree {
         traversal_indices.pop_back();
         old_node = locked_nodes.back();
         locked_nodes.pop_back();
+        num_popped++;
         old_node->children_[child_index] = new_node;
         old_node->ReleaseWriteLatch();
+        if (holds_tree_latch) {
+          TERRIER_ASSERT(old_node == root_, "if we hold the tree latch, then we are adjusting the root");
+          UnlatchRoot();
+          holds_tree_latch = false;
+        }
       }
     } else {
+      which_case = 3;
       TERRIER_ASSERT(locked_nodes.empty() && old_node == root_ && holds_tree_latch,
           "we should have split all the way to the top");
       auto new_root = new InnerNode(this);
@@ -991,8 +1006,11 @@ class BPlusTree {
       old_node->MarkDeleted();
       old_node->ReleaseWriteLatch();
       UnlatchRoot();
+      holds_tree_latch = false;
     }
 
+    TERRIER_ASSERT(!holds_tree_latch, "should not hold the rootlatch on return");
+    TERRIER_ASSERT(locked_size == num_popped + locked_index, "conservation of nodes is a thing");
     return true;
   }
 
@@ -1153,22 +1171,25 @@ class BPlusTree {
   }
 
   void LatchRoot() {
-    bool t = true;
-    bool f = false;
-    while (!root_latch_.compare_exchange_strong(f, t)) {}
-    TERRIER_ASSERT(root_latch_, "root latch should be held");
+//    bool t = true;
+//    bool f = false;
+//    while (!root_latch_.compare_exchange_strong(f, t)) {}
+//    TERRIER_ASSERT(root_latch_, "root latch should be held");
+    root_latch_.Lock();
   }
 
   void UnlatchRoot() {
-    TERRIER_ASSERT(root_latch_, "root latch should be held");
-    root_latch_ = false;
+//    TERRIER_ASSERT(root_latch_, "root latch should be held");
+//    root_latch_ = false;
+    root_latch_.Unlock();
   }
 
   std::atomic<uint64_t> active_epochs_[MAX_NUM_ACTIVE_EPOCHS] = {};
 //  InnerNodeAllocator inner_node_allocator_ = InnerNodeAllocator(ALLOCATOR_START_SIZE, this);
 //  LeafNodeAllocator leaf_node_allocator_ = LeafNodeAllocator(ALLOCATOR_START_SIZE, this);
   std::atomic<uint64_t> epoch_ = 1;
-  std::atomic<bool> root_latch_;
+  common::SpinLatch root_latch_;
+//  std::atomic<bool> root_latch_ = false;
   std::atomic<BaseNode *> root_;
   std::atomic<uint64_t> structure_size_;
 };
