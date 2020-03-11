@@ -209,7 +209,11 @@ class BPlusTreeIndex final : public Index {
 
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
     // Perform lookup in BwTree
-    bplustree_->ScanDescending(index_low_key, index_high_key, value_list);
+    auto lambda = [&] (TupleSlot tuple) {
+      return IsVisible(txn, tuple);
+    };
+    std::function<bool(TupleSlot)> function = lambda;
+    bplustree_->ScanDescending(index_low_key, index_high_key, value_list, function);
   }
 
   void ScanLimitDescending(const transaction::TransactionContext &txn, const ProjectedRow &low_key,
@@ -225,7 +229,10 @@ class BPlusTreeIndex final : public Index {
 
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
 
-    bplustree_->ScanDescendingLimit(index_low_key, index_high_key, limit, value_list);
+    auto lambda = [&] (TupleSlot tuple) {
+      return IsVisible(txn, tuple);
+    };
+    bplustree_->ScanDescendingLimit(index_low_key, index_high_key, limit, value_list, lambda);
   }
 };
 
