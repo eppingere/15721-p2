@@ -73,7 +73,7 @@ class BPlusTree {
         value_eq_obj_{p_value_eq_obj},
         epoch_(0),
         structure_size_{sizeof(LeafNode)} {
-    root_ = static_cast<BaseNode *>(new LeafNode(this));
+    root_ = static_cast<BaseNode *>(this->leaf_node_allocator_.NewNode());
   }
 
   // Key comparator, and key and value equality checker
@@ -141,11 +141,12 @@ class BPlusTree {
 
   class BaseNode {
    public:
+    BaseNode() {}
+
     BaseNode(BPlusTree *tree, BPlusTree::NodeType t)
         : tree_(tree),
           info_(t == NodeType::LEAF ? NODE_TYPE_MASK : 0),
           size_(0),
-          offset_(0),
           limit_(t == NodeType::LEAF ? LEAF_SIZE : BRANCH_FACTOR - 1) {}
     ~BaseNode() = default;
 
@@ -154,7 +155,7 @@ class BPlusTree {
     std::atomic<bool> deleted_ = false;
     std::atomic<uint64_t> deleted_epoch_ = 0;
     std::atomic<uint64_t> info_;
-    std::atomic<uint16_t> size_, offset_, limit_;
+    std::atomic<uint16_t> size_, limit_;
 
     NodeType GetType() { return static_cast<NodeType>((info_ & NODE_TYPE_MASK) >> 62); }
 
@@ -170,7 +171,6 @@ class BPlusTree {
       info_ = GetType() == NodeType::LEAF ? NODE_TYPE_MASK : 0;
       deleted_epoch_ = 0;
       size_ = 0;
-      offset_ = 0;
     }
 
     void GetWriteLatch() {
@@ -194,7 +194,9 @@ class BPlusTree {
 
   class InnerNode : public BaseNode {
    public:
-    explicit InnerNode(BPlusTree *tree) : BaseNode(tree, NodeType::INNER_NODE) {}
+    InnerNode() {}
+
+    InnerNode(BPlusTree *tree) : BaseNode(tree, NodeType::INNER_NODE) {}
     ~InnerNode() = default;
 
     uint16_t FindMinChild(KeyType key) {
@@ -382,7 +384,9 @@ class BPlusTree {
 
   class LeafNode : public BaseNode {
    public:
-    explicit LeafNode(BPlusTree *tree) : BaseNode(tree, NodeType::LEAF), left_(nullptr), right_(nullptr) {}
+    LeafNode() {}
+
+    LeafNode(BPlusTree *tree) : BaseNode(tree, NodeType::LEAF), left_(nullptr), right_(nullptr) {}
     ~LeafNode() = default;
 
     bool ScanPredicate(KeyType key, std::function<bool(const ValueType)> predicate) {
@@ -511,7 +515,7 @@ class BPlusTree {
      public:
       InnerNodeAllocatorArray(BPlusTree<KeyType, ValueType> *tree) {
         for (uint64_t i = 0; i < ALLOCATOR_ARRAY_SIZE; i++) {
-          array_[i] = InnerNode(tree);
+          array_[i] = std::move(InnerNode(tree));
         }
       }
 
@@ -543,7 +547,7 @@ class BPlusTree {
       }
 
       std::atomic<uint64_t> allocated_masks_[(ALLOCATOR_ARRAY_SIZE + BITS_IN_UINT64 - 1) / BITS_IN_UINT64] = {};
-      InnerNode array_[ALLOCATOR_ARRAY_SIZE] = {};
+      LeafNode array_[ALLOCATOR_ARRAY_SIZE];
     };
 
     void ReclaimOldNodes(uint64_t safe_to_delete_epoch) {
@@ -614,7 +618,7 @@ class BPlusTree {
      public:
       LeafNodeAllocatorArray(BPlusTree<KeyType, ValueType> tree) {
         for (uint64_t i = 0; i < ALLOCATOR_ARRAY_SIZE; i++) {
-          array_[i] = LeafNode(tree);
+          array_[i] = std::move(LeafNode(tree));
         }
       }
 
@@ -818,8 +822,8 @@ class BPlusTree {
     }
 
     // Otherwise must split so create new leaf
-    LeafNode* new_leaf_right = new LeafNode(this);
-    LeafNode* new_leaf_left = new LeafNode(this);
+    LeafNode* new_leaf_right = this->leaf_node_allocator_.NewNode();
+    LeafNode* new_leaf_left = this->leaf_node_allocator_.NewNode();
 
     std::vector<std::pair<KeyType, ValueType>> kvps;
     kvps.emplace_back(std::pair<KeyType, ValueType>(key, val));
@@ -872,7 +876,7 @@ class BPlusTree {
       TERRIER_ASSERT(leaf == root_ && holds_tree_latch,
                      "somehow we had to split a leaf without having to modify the parent");
       // Create new root and update attributes for new root and tree
-      auto new_root = new InnerNode(this);
+      auto new_root = this->inner_node_allocator_.NewNode();
       new_root->keys_[0] = new_key;
       new_root->children_[0] = new_leaf_left;
       new_root->children_[1] = new_leaf_right;
@@ -896,8 +900,8 @@ class BPlusTree {
         break;
       }
 
-      new_node_left = new InnerNode(this);
-      new_node_right = new InnerNode(this);
+      new_node_left = this->leaf_node_allocator_.NewNode();
+      new_node_right = this->leaf_node_allocator_.NewNode();
       for (i = 0; i < old_node->size_; i++) {
         new_node_left->keys_[i] = old_node->keys_[i];
         new_node_left->children_[i] = old_node->children_[i].load();
@@ -937,7 +941,7 @@ class BPlusTree {
 
     if (old_node->size_ < old_node->limit_) {
       TERRIER_ASSERT(old_node->write_latch, "must hold write latch if not full");
-      InnerNode* new_node = new InnerNode(this);
+      InnerNode* new_node = this->leaf_node_allocator_.NewNode();
       new_node->size_ = old_node->size_.load();
       for (i = 0; i < old_node->size_; i++) {
         new_node->keys_[i] = old_node->keys_[i];
@@ -974,7 +978,7 @@ class BPlusTree {
     } else {
       TERRIER_ASSERT(locked_nodes.empty() && old_node == root_ && holds_tree_latch,
           "we should have split all the way to the top");
-      auto new_root = new InnerNode(this);
+      auto new_root = this->leaf_node_allocator_.NewNode();
       new_root->keys_[0] = new_key;
       new_root->children_[0] = new_child_left;
       new_root->children_[1] = new_child_right;
