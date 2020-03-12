@@ -139,6 +139,12 @@ class BPlusTree {
     INNER_NODE = false,
   };
 
+  enum class OptimisticResult : uint8_t {
+    Success = 0,
+    Failure = 1,
+    RetryableFailure = 2,
+  };
+
   class BaseNode {
    public:
     BaseNode() {}
@@ -151,7 +157,8 @@ class BPlusTree {
     ~BaseNode() = default;
 
     BPlusTree *tree_;
-    std::atomic<bool> write_latch = false;
+//    std::atomic<bool> write_latch = false;
+    common::SpinLatch write_latch;
     std::atomic<bool> deleted_ = false;
     std::atomic<uint64_t> deleted_epoch_ = 0;
     std::atomic<uint64_t> info_;
@@ -174,11 +181,18 @@ class BPlusTree {
     }
 
     void GetWriteLatch() {
-      bool t = true;
-      bool f = false;
-      while (!write_latch.compare_exchange_strong(f, t)) {}
+//      bool t = true;
+//      bool f = false;
+//      while (!write_latch.compare_exchange_strong(f, t)) {}
+//      TERRIER_ASSERT(write_latch, "should hold latch when latched");
+      write_latch.Lock();
     }
-    void ReleaseWriteLatch() { write_latch = false; }
+    void ReleaseWriteLatch() {
+//      TERRIER_ASSERT(write_latch, "should only be unlatching when latch is held");
+//      write_latch = false;
+//      TERRIER_ASSERT(!write_latch, "should actually release write latch");
+      write_latch.Unlock();
+    }
 
     class ScopedWriteLatch {
      public:
@@ -759,31 +773,45 @@ class BPlusTree {
 
     std::vector<InnerNode *> locked_nodes;
     std::vector<uint16_t> traversal_indices;
-    uint64_t locked_index = 0; // everything in locked_nodes from this index onwards is locked
 
     LatchRoot();
     bool holds_tree_latch = true;
     BaseNode *n = this->root_;
+    TERRIER_ASSERT(!n->deleted_, "we should never traverse deleted nodes");
 
     // Find minimum leaf that stores would store key, taking locks as we go down tree
     while (n->GetType() != NodeType::LEAF) {
       auto inner_n = static_cast<InnerNode *>(n);
-      n->GetWriteLatch();
+      inner_n->GetWriteLatch();
       if (n->size_ < n->limit_) {
         if (holds_tree_latch && locked_nodes.size() > 1) {
-          TERRIER_ASSERT(locked_index == 0, "index should still be 0 if you have tree latch");
           UnlatchRoot();
           holds_tree_latch = false;
         }
-        for (; !locked_nodes.empty() && locked_nodes.size() - locked_index > 1; locked_index++) {
-          locked_nodes[locked_index]->ReleaseWriteLatch();
+        for (uint64_t i = 0; (!locked_nodes.empty()) && i < locked_nodes.size() - 1; i++) {
+          locked_nodes[i]->ReleaseWriteLatch();
         }
+        if (!locked_nodes.empty()) {
+          InnerNode * last = locked_nodes.back();
+          uint16_t last_index = traversal_indices.back();
+          locked_nodes.clear();
+          traversal_indices.clear();
+          locked_nodes.emplace_back(last);
+          traversal_indices.emplace_back(last_index);
+        }
+
       }
       uint16_t child_index = inner_n->FindMinChild(key);
       n = inner_n->children_[child_index];
       locked_nodes.emplace_back(inner_n);
       traversal_indices.emplace_back(child_index);
+      TERRIER_ASSERT(!n->deleted_, "we should never traverse deleted nodes");
     }
+    TERRIER_ASSERT(!n->deleted_, "we should never traverse deleted nodes");
+
+//    for (InnerNode* node : locked_nodes)
+//      TERRIER_ASSERT(node->write_latch, "locked nodes should actually be locked");
+
 
     // If leaf is not full, insert, unlock all parent nodes and return
     auto leaf = static_cast<LeafNode *>(n);
@@ -792,9 +820,9 @@ class BPlusTree {
         UnlatchRoot();
         holds_tree_latch = false;
       }
-      for (; locked_index < locked_nodes.size(); locked_index++) {
-        locked_nodes[locked_index]->ReleaseWriteLatch();
-      }
+      for (InnerNode* node : locked_nodes)
+        node->ReleaseWriteLatch();
+
       return !(*predicate_satisfied);
     }
 
@@ -802,8 +830,8 @@ class BPlusTree {
 
     LeafNode *left, *right;
     while (true) {
-      left = leaf->left_;
-      right = leaf->right_;
+      left = leaf->left_.load();
+      right = leaf->right_.load();
       if (LIKELY(left != nullptr)) {
         left->GetWriteLatch();
         if (UNLIKELY(left != leaf->left_)) {
@@ -815,7 +843,9 @@ class BPlusTree {
       if (LIKELY(right != nullptr)) {
         right->GetWriteLatch();
         if (UNLIKELY(right != leaf->right_)) {
-          if (LIKELY(left != nullptr)) left->ReleaseWriteLatch();
+          if (LIKELY(left != nullptr)) {
+            left->ReleaseWriteLatch();
+          }
           leaf->ReleaseWriteLatch();
           right->ReleaseWriteLatch();
           continue;
@@ -823,6 +853,9 @@ class BPlusTree {
       }
       break;
     }
+
+    TERRIER_ASSERT(!leaf->deleted_ && (left == nullptr || !left->deleted_) && (right == nullptr || !right->deleted_), "none of leaf right and left should be marked as deleted");
+
 
     // Otherwise must split so create new leaf
     LeafNode* new_leaf_right = new LeafNode(this);
@@ -889,7 +922,6 @@ class BPlusTree {
       BaseNode *old_root = root_;
       root_ = new_root;
       old_root->MarkDeleted();
-      old_root->ReleaseWriteLatch();
       UnlatchRoot();
       holds_tree_latch = false;
       return true;
@@ -899,7 +931,6 @@ class BPlusTree {
     auto new_child_left = static_cast<BaseNode *>(new_leaf_left);
     auto new_child_right = static_cast<BaseNode *>(new_leaf_right);
 
-    uint64_t locked_size = locked_nodes.size();
     uint64_t num_popped = 0;
     while (!locked_nodes.empty()) {
       old_node = locked_nodes.back();
@@ -949,7 +980,7 @@ class BPlusTree {
 
     int which_case = 0;
     if (old_node->size_ < old_node->limit_) {
-      TERRIER_ASSERT(old_node->write_latch, "must hold write latch if not full");
+//      TERRIER_ASSERT(old_node->write_latch, "must hold write latch if not full");
       InnerNode* new_node = new InnerNode(this);
       new_node->size_ = old_node->size_.load();
       for (i = 0; i < old_node->size_; i++) {
@@ -1003,14 +1034,12 @@ class BPlusTree {
       new_root->children_[1] = new_child_right;
       new_root->size_ = 1;
       root_ = new_root;
-      old_node->MarkDeleted();
-      old_node->ReleaseWriteLatch();
       UnlatchRoot();
       holds_tree_latch = false;
     }
 
+    TERRIER_ASSERT(locked_nodes.size() == 0, "we should have unlocked all locked nodes");
     TERRIER_ASSERT(!holds_tree_latch, "should not hold the rootlatch on return");
-    TERRIER_ASSERT(locked_size == num_popped + locked_index, "conservation of nodes is a thing");
     return true;
   }
 
@@ -1143,13 +1172,23 @@ class BPlusTree {
   }
 
   LeafNode* FindMinLeaf(KeyType key) {
-    BaseNode *n = root_;
-    while (n->GetType() != NodeType::LEAF) {
-      InnerNode *inner_n = static_cast<InnerNode *>(n);
-      uint16_t child_index = inner_n->FindMinChild(key);
-      n = inner_n->children_[child_index];
+
+    while (true) {
+    OuterLoop:
+      BaseNode *n = root_;
+      if (UNLIKELY(n->deleted_)) {
+        goto OuterLoop;
+      }
+      while (n->GetType() != NodeType::LEAF) {
+        InnerNode *inner_n = static_cast<InnerNode *>(n);
+        uint16_t child_index = inner_n->FindMinChild(key);
+        n = inner_n->children_[child_index];
+        if (n->deleted_) {
+          goto OuterLoop;
+        }
+      }
+      return static_cast<LeafNode *>(n);
     }
-    return static_cast<LeafNode *>(n);
   }
 
   LeafNode* FindMaxLeaf() {
