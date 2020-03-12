@@ -468,10 +468,36 @@ class BPlusTree {
       return true;
     }
 
-    bool ScanRange(KeyType low, KeyType *hi, std::vector<ValueType> *values, std::function<bool(ValueType)> predicate) {
+    bool ScanRange(KeyType low, KeyType *hi, std::vector<ValueType> *values, std::function<bool(std::pair<KeyType, ValueType>)> predicate) {
       bool res = true;
       std::vector<std::pair<KeyType, ValueType>> temp_values;
       for (uint16_t i = 0; i < this->size_; i++) {
+        if (IsReadable(i)) {
+          if (this->tree_->KeyCmpLessEqual(low, keys_[i]) &&
+              (hi == nullptr || this->tree_->KeyCmpLessEqual(keys_[i], *hi))) {
+            auto pair = std::pair<KeyType, ValueType>(keys_[i], values_[i]);
+            if (predicate(pair)) temp_values.emplace_back(std::pair<KeyType, ValueType>(keys_[i], values_[i]));
+          } else if (hi == nullptr || this->tree_->KeyCmpGreater(keys_[i], *hi)) {
+            res = false;
+          }
+        }
+      }
+
+      sort(temp_values.begin(), temp_values.end(),  [&] (std::pair<KeyType, ValueType> a, std::pair<KeyType, ValueType> b) {
+        return this->tree_->KeyCmpLess(a.first, b.first);
+      });
+
+      for (uint16_t i = 0; i < temp_values.size(); i++) {
+        values->emplace_back(temp_values[i].second);
+      }
+
+      return res;
+    }
+
+    bool ScanRangeReverse(KeyType low, KeyType *hi, std::vector<ValueType> *values, std::function<bool(ValueType)> predicate) {
+      bool res = true;
+      std::vector<std::pair<KeyType, ValueType>> temp_values;
+      for (uint16_t i = this->size_ - 1; i < this->size_; i--) {
         if (IsReadable(i)) {
           if (this->tree_->KeyCmpLessEqual(low, keys_[i]) &&
               (hi == nullptr || this->tree_->KeyCmpLessEqual(keys_[i], *hi))) {
@@ -483,7 +509,7 @@ class BPlusTree {
       }
 
       sort(temp_values.begin(), temp_values.end(),  [&] (std::pair<KeyType, ValueType> a, std::pair<KeyType, ValueType> b) {
-        return this->tree_->KeyCmpLess(a.first, b.first);
+        return this->tree_->KeyCmpGreater(a.first, b.first);
       });
 
       for (uint16_t i = 0; i < temp_values.size(); i++) {
@@ -1050,22 +1076,25 @@ class BPlusTree {
     return result;
   }
 
-  void ScanKeyHelper(KeyType key, std::vector<ValueType> *values) {
-    auto leaf = FindMinLeaf(key);
-    while (true) {
-      if (!leaf->ScanRange(key, &key, values, [] (ValueType val) { return true; })) {
-        break;
-      }
-      leaf = leaf->right_;
-      if (leaf == nullptr) {
-        break;
+  void ScanKeyHelper(KeyType key, std::vector<ValueType> *values, std::function<bool(ValueType)> predicate) {
+    bool done = false;
+    for (auto* leaf = FindMinLeaf(key); leaf != nullptr && !done; leaf = leaf->right_) {
+      for (uint16_t i = 0; i < leaf->size_; i++) {
+        if (leaf->IsReadable(i)) {
+          if (KeyCmpEqual(key, leaf->keys_[i]) && predicate(leaf->values_[i])) {
+            values->emplace_back(leaf->values_[i]);
+          } else if (KeyCmpLess(key, leaf->keys_[i])) {
+            done = true;
+          }
+        }
       }
     }
+
   }
 
-  void ScanKey(KeyType key, std::vector<ValueType> *values) {
+  void ScanKey(KeyType key, std::vector<ValueType> *values, std::function<bool(ValueType)> predicate) {
     uint64_t epoch = StartFunction();
-    ScanKeyHelper(key, values);
+    ScanKeyHelper(key, values, predicate);
     EndFunction(epoch);
   }
 
@@ -1092,17 +1121,6 @@ class BPlusTree {
     bool result = RemoveHelper(key, value);
     EndFunction(epoch);
     return result;
-  }
-
-  void ScanDescending(KeyType lo, KeyType hi, std::vector<ValueType> *values, std::function<bool(ValueType)> predicate) {
-    for (LeafNode *l = FindMaxLeaf(hi); l != nullptr && !l->ScanRange(lo, &hi, values, predicate); l = l->left_) {}
-  }
-
-  void ScanDescendingLimit(KeyType lo, KeyType hi, uint32_t limit, std::vector<ValueType> *values, std::function<bool(ValueType)> predicate) {
-    for (LeafNode *l = FindMaxLeaf(hi);
-         l != nullptr && values->size() < limit && !l->ScanRange(lo, &hi, values, predicate);
-         l = l->left_) {}
-    while (values->size() > limit) values->pop_back();
   }
 
   void MergeToDepth(InnerNode *node, uint64_t max_depth, uint64_t current_depth) {
