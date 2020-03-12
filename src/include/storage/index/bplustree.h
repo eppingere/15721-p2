@@ -1163,16 +1163,24 @@ class BPlusTree {
   }
 
   LeafNode* FindMinLeaf() {
-    BaseNode *n = root_;
-    while (n->GetType() != NodeType::LEAF) {
-      InnerNode *inner_n = static_cast<InnerNode *>(n);
-      n = inner_n->children_[0];
+    while (true) {
+      OuterLoop:
+      BaseNode *n = root_;
+      if (UNLIKELY(n->deleted_)) {
+        goto OuterLoop;
+      }
+      while (n->GetType() != NodeType::LEAF) {
+        InnerNode *inner_n = static_cast<InnerNode *>(n);
+        n = inner_n->children_[0];
+        if (n->deleted_) {
+          goto OuterLoop;
+        }
+      }
+      return static_cast<LeafNode *>(n);
     }
-    return static_cast<LeafNode *>(n);
   }
 
   LeafNode* FindMinLeaf(KeyType key) {
-
     while (true) {
     OuterLoop:
       BaseNode *n = root_;
@@ -1192,21 +1200,39 @@ class BPlusTree {
   }
 
   LeafNode* FindMaxLeaf() {
-    BaseNode *n = root_;
-    while (n->GetType() != NodeType::LEAF) {
-      InnerNode *inner_n = static_cast<InnerNode *>(n);
-      n = inner_n->children_[inner_n->size_];
+    while (true) {
+      OuterLoop:
+      BaseNode *n = root_;
+      if (UNLIKELY(n->deleted_)) {
+        goto OuterLoop;
+      }
+      while (n->GetType() != NodeType::LEAF) {
+        InnerNode *inner_n = static_cast<InnerNode *>(n);
+        n = inner_n->children_[n->size_];
+        if (n->deleted_) {
+          goto OuterLoop;
+        }
+      }
+      return static_cast<LeafNode *>(n);
     }
-    return static_cast<LeafNode *>(n);
   }
 
   LeafNode* FindMaxLeaf(KeyType key) {
-    BaseNode *n = root_;
-    while (n->GetType() != NodeType::LEAF) {
-      InnerNode *inner_n = static_cast<InnerNode *>(n);
-      n = inner_n->FindMaxChild(key);
+    while (true) {
+      OuterLoop:
+      BaseNode *n = root_;
+      if (UNLIKELY(n->deleted_)) {
+        goto OuterLoop;
+      }
+      while (n->GetType() != NodeType::LEAF) {
+        InnerNode *inner_n = static_cast<InnerNode *>(n);
+        n = inner_n->FindMaxChild(key);
+        if (n->deleted_) {
+          goto OuterLoop;
+        }
+      }
+      return static_cast<LeafNode *>(n);
     }
-    return static_cast<LeafNode *>(n);
   }
 
   void LatchRoot() {
