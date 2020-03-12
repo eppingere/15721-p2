@@ -419,6 +419,70 @@ TEST_F(BPlusTreeIndexTests, UniqueKey3) {
   txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
 }
 
+// Verifies that primary key insert fails even if conflicting transaction is an uncommitted delete
+// NOLINTNEXTLINE
+TEST_F(BPlusTreeIndexTests, UniqueKey4) {
+  auto *txn0 = txn_manager_->BeginTransaction();
+
+  // txn 0 inserts into table
+  auto *insert_redo =
+      txn0->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
+  auto *insert_tuple = insert_redo->Delta();
+  *reinterpret_cast<int32_t *>(insert_tuple->AccessForceNotNull(0)) = 15721;
+  const auto tuple_slot = sql_table_->Insert(common::ManagedPointer(txn0), insert_redo);
+
+  // txn 0 inserts into index
+  auto *insert_key = unique_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+  *reinterpret_cast<int32_t *>(insert_key->AccessForceNotNull(0)) = 15721;
+  EXPECT_TRUE(unique_index_->InsertUnique(common::ManagedPointer(txn0), *insert_key, tuple_slot));
+
+  std::vector<storage::TupleSlot> results;
+
+  auto *const scan_key_pr = unique_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+
+  // txn 0 scans index and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  unique_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  // txn 0 deletes from table
+  txn0->StageDelete(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_slot);
+  EXPECT_TRUE(sql_table_->Delete(common::ManagedPointer(txn0), tuple_slot));
+
+  // txn 0 deletes from index
+  insert_key = unique_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+  *reinterpret_cast<int32_t *>(insert_key->AccessForceNotNull(0)) = 15721;
+  unique_index_->Delete(common::ManagedPointer(txn0), *insert_key, tuple_slot);
+
+  auto *txn1 = txn_manager_->BeginTransaction();
+
+  // txn 1 inserts into table
+  insert_redo = txn1->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
+  insert_tuple = insert_redo->Delta();
+  *reinterpret_cast<int32_t *>(insert_tuple->AccessForceNotNull(0)) = 15721;
+  const auto new_tuple_slot = sql_table_->Insert(common::ManagedPointer(txn1), insert_redo);
+
+  // txn 1 inserts into index and fails due to write-write conflict with txn 0
+  insert_key = unique_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+  *reinterpret_cast<int32_t *>(insert_key->AccessForceNotNull(0)) = 15721;
+  EXPECT_FALSE(unique_index_->InsertUnique(common::ManagedPointer(txn1), *insert_key, new_tuple_slot));
+
+  txn_manager_->Commit(txn0, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  txn_manager_->Abort(txn1);
+
+  auto *txn2 = txn_manager_->BeginTransaction();
+
+  // txn 2 scans index and gets no visible result
+  unique_index_->ScanKey(*txn2, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
+}
+
 //    Txn #0 | Txn #1 | Txn #2 |
 //    --------------------------
 //    BEGIN  |        |        |
@@ -563,6 +627,1028 @@ TEST_F(BPlusTreeIndexTests, CommitInsert2) {
 
   txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
 }
+
+//    Txn #0 | Txn #1 | Txn #2 |
+//    --------------------------
+//    BEGIN  |        |        |
+//    W(X)   |        |        |
+//    R(X)   |        |        |
+//           | BEGIN  |        |
+//           | R(X)   |        |
+//    ABORT  |        |        |
+//           | R(X)   |        |
+//           | COMMIT |        |
+//           |        | BEGIN  |
+//           |        | R(X)   |
+//           |        | COMMIT |
+//
+// Txn #0 should only read Txn #0's version of X
+// Txn #1 should only read the previous version of X because Txn #0's is uncommitted
+// Txn #2 should only read the previous version of X because Txn #0 aborted
+//
+// This test confirms that we are not susceptible to the DIRTY READS and UNREPEATABLE READS anomalies
+// NOLINTNEXTLINE
+TEST_F(BPlusTreeIndexTests, AbortInsert1) {
+  auto *txn0 = txn_manager_->BeginTransaction();
+
+  // txn 0 inserts into table
+  auto *insert_redo =
+      txn0->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
+  auto *insert_tuple = insert_redo->Delta();
+  *reinterpret_cast<int32_t *>(insert_tuple->AccessForceNotNull(0)) = 15721;
+  const auto tuple_slot = sql_table_->Insert(common::ManagedPointer(txn0), insert_redo);
+
+  // txn 0 inserts into index
+  auto *const insert_key = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+  *reinterpret_cast<int32_t *>(insert_key->AccessForceNotNull(0)) = 15721;
+  EXPECT_TRUE(default_index_->Insert(common::ManagedPointer(txn0), *insert_key, tuple_slot));
+
+  std::vector<storage::TupleSlot> results;
+
+  auto *const scan_key_pr = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+
+  // txn 0 scans index and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  auto *txn1 = txn_manager_->BeginTransaction();
+
+  // txn 1 scans index and gets no visible result
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  txn_manager_->Abort(txn0);
+
+  // txn 1 scans index and gets no visible result
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  txn_manager_->Commit(txn1, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  auto *txn2 = txn_manager_->BeginTransaction();
+
+  // txn 2 scans index and gets no visible result
+  default_index_->ScanKey(*txn2, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
+}
+
+//    Txn #0 | Txn #1 | Txn #2 |
+//    --------------------------
+//    BEGIN  |        |        |
+//           | BEGIN  |        |
+//           | W(X)   |        |
+//    R(X)   |        |        |
+//           | R(X)   |        |
+//           | ABORT  |        |
+//    R(X)   |        |        |
+//    COMMIT |        |        |
+//           |        | BEGIN  |
+//           |        | R(X)   |
+//           |        | COMMIT |
+//
+// Txn #0 should only read the previous version of X because Txn #1's is uncommitted
+// Txn #1 should only read Txn #1's version of X
+// Txn #2 should only read the previous version of X because Txn #1 aborted
+//
+// This test confirms that we are not susceptible to the DIRTY READS and UNREPEATABLE READS anomalies
+// NOLINTNEXTLINE
+TEST_F(BPlusTreeIndexTests, AbortInsert2) {
+  auto *txn0 = txn_manager_->BeginTransaction();
+  auto *txn1 = txn_manager_->BeginTransaction();
+
+  // txn 1 inserts into table
+  auto *insert_redo =
+      txn1->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
+  auto *insert_tuple = insert_redo->Delta();
+  *reinterpret_cast<int32_t *>(insert_tuple->AccessForceNotNull(0)) = 15721;
+  const auto tuple_slot = sql_table_->Insert(common::ManagedPointer(txn1), insert_redo);
+
+  // txn 1 inserts into index
+  auto *const insert_key = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+  *reinterpret_cast<int32_t *>(insert_key->AccessForceNotNull(0)) = 15721;
+  EXPECT_TRUE(default_index_->Insert(common::ManagedPointer(txn1), *insert_key, tuple_slot));
+
+  std::vector<storage::TupleSlot> results;
+
+  auto *const scan_key_pr = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+
+  // txn 0 scans index and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  // txn 1 scans index and gets a visible, correct result
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  txn_manager_->Abort(txn1);
+
+  // txn 0 scans index and gets no visible result
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  txn_manager_->Commit(txn0, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  auto *txn2 = txn_manager_->BeginTransaction();
+
+  // txn 2 scans index and gets no visible result
+  default_index_->ScanKey(*txn2, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
+}
+
+//    Txn #0 | Txn #1 | Txn #2 |
+//    --------------------------
+//    BEGIN  |        |        |
+//    W(X)   |        |        |
+//    R(X)   |        |        |
+//           | BEGIN  |        |
+//           | R(X)   |        |
+//    COMMIT |        |        |
+//           | R(X)   |        |
+//           | COMMIT |        |
+//           |        | BEGIN  |
+//           |        | R(X)   |
+//           |        | COMMIT |
+//
+// Txn #0 should only read Txn #0's version of X
+// Txn #1 should only read the previous version of X because its start time is before #0's commit
+// Txn #2 should only read Txn #0's version of X
+//
+// This test confirms that we are not susceptible to the DIRTY READS and UNREPEATABLE READS anomalies
+// NOLINTNEXTLINE
+TEST_F(BPlusTreeIndexTests, CommitUpdate1) {
+  auto *insert_txn = txn_manager_->BeginTransaction();
+
+  // insert_txn inserts into table
+  auto *insert_redo =
+      insert_txn->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
+  auto *insert_tuple = insert_redo->Delta();
+  *reinterpret_cast<int32_t *>(insert_tuple->AccessForceNotNull(0)) = 15721;
+  const auto tuple_slot = sql_table_->Insert(common::ManagedPointer(insert_txn), insert_redo);
+
+  // insert_txn inserts into index
+  auto *insert_key = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+  *reinterpret_cast<int32_t *>(insert_key->AccessForceNotNull(0)) = 15721;
+  EXPECT_TRUE(default_index_->Insert(common::ManagedPointer(insert_txn), *insert_key, tuple_slot));
+
+  txn_manager_->Commit(insert_txn, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  std::vector<storage::TupleSlot> results;
+
+  auto *const scan_key_pr = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+
+  auto *txn0 = txn_manager_->BeginTransaction();
+
+  // txn 0 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  // txn 0 updates in the table, which is really a delete and insert since it's an indexed attribute
+  txn0->StageDelete(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, results[0]);
+  EXPECT_TRUE(sql_table_->Delete(common::ManagedPointer(txn0), results[0]));
+  default_index_->Delete(common::ManagedPointer(txn0), *insert_key, results[0]);
+
+  insert_redo = txn0->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
+  insert_tuple = insert_redo->Delta();
+  *reinterpret_cast<int32_t *>(insert_tuple->AccessForceNotNull(0)) = 15445;
+  const auto new_tuple_slot = sql_table_->Insert(common::ManagedPointer(txn0), insert_redo);
+
+  insert_key = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+  *reinterpret_cast<int32_t *>(insert_key->AccessForceNotNull(0)) = 15445;
+  EXPECT_TRUE(default_index_->Insert(common::ManagedPointer(txn0), *insert_key, new_tuple_slot));
+
+  // txn 1 scans index for 15721 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  // txn 1 scans index for 15445 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15445;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(new_tuple_slot, results[0]);
+  results.clear();
+
+  auto *txn1 = txn_manager_->BeginTransaction();
+
+  // txn 1 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  // txn 1 scans index for 15445 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15445;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  txn_manager_->Commit(txn0, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  // txn 1 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  // txn 1 scans index for 15445 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15445;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  txn_manager_->Commit(txn1, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  auto *txn2 = txn_manager_->BeginTransaction();
+
+  // txn 2 scans index for 15721 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn2, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  // txn 2 scans index for 15445 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15445;
+  default_index_->ScanKey(*txn2, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(new_tuple_slot, results[0]);
+  results.clear();
+
+  txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
+}
+
+//    Txn #0 | Txn #1 | Txn #2 |
+//    --------------------------
+//    BEGIN  |        |        |
+//           | BEGIN  |        |
+//           | W(X)   |        |
+//    R(X)   |        |        |
+//           | R(X)   |        |
+//           | COMMIT |        |
+//    R(X)   |        |        |
+//    COMMIT |        |        |
+//           |        | BEGIN  |
+//           |        | R(X)   |
+//           |        | COMMIT |
+//
+// Txn #0 should only read the previous version of X because its start time is before #1's commit
+// Txn #1 should only read Txn #1's version of X
+// Txn #2 should only read Txn #1's version of X
+//
+// This test confirms that we are not susceptible to the DIRTY READS and UNREPEATABLE READS anomalies
+// NOLINTNEXTLINE
+TEST_F(BPlusTreeIndexTests, CommitUpdate2) {
+  auto *insert_txn = txn_manager_->BeginTransaction();
+
+  // insert_txn inserts into table
+  auto *insert_redo =
+      insert_txn->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
+  auto *insert_tuple = insert_redo->Delta();
+  *reinterpret_cast<int32_t *>(insert_tuple->AccessForceNotNull(0)) = 15721;
+  const auto tuple_slot = sql_table_->Insert(common::ManagedPointer(insert_txn), insert_redo);
+
+  // insert_txn inserts into index
+  auto *insert_key = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+  *reinterpret_cast<int32_t *>(insert_key->AccessForceNotNull(0)) = 15721;
+  EXPECT_TRUE(default_index_->Insert(common::ManagedPointer(insert_txn), *insert_key, tuple_slot));
+
+  txn_manager_->Commit(insert_txn, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  std::vector<storage::TupleSlot> results;
+
+  auto *const scan_key_pr = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+
+  auto *txn0 = txn_manager_->BeginTransaction();
+  auto *txn1 = txn_manager_->BeginTransaction();
+
+  // txn 1 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+
+  // txn 1 updates in the table, which is really a delete and insert since it's an indexed attribute
+  txn1->StageDelete(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, results[0]);
+  EXPECT_TRUE(sql_table_->Delete(common::ManagedPointer(txn1), results[0]));
+  default_index_->Delete(common::ManagedPointer(txn1), *insert_key, results[0]);
+
+  insert_redo = txn1->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
+  insert_tuple = insert_redo->Delta();
+  *reinterpret_cast<int32_t *>(insert_tuple->AccessForceNotNull(0)) = 15445;
+  const auto new_tuple_slot = sql_table_->Insert(common::ManagedPointer(txn1), insert_redo);
+
+  insert_key = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+  *reinterpret_cast<int32_t *>(insert_key->AccessForceNotNull(0)) = 15445;
+  EXPECT_TRUE(default_index_->Insert(common::ManagedPointer(txn1), *insert_key, new_tuple_slot));
+
+  results.clear();
+
+  // txn 0 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  // txn 0 scans index for 15445 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15445;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  // txn 1 scans index for 15721 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  // txn 1 scans index for 15445 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15445;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(new_tuple_slot, results[0]);
+  results.clear();
+
+  txn_manager_->Commit(txn1, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  // txn 0 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  // txn 0 scans index for 15445 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15445;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  txn_manager_->Commit(txn0, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  auto *txn2 = txn_manager_->BeginTransaction();
+
+  // txn 2 scans index for 15721 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn2, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  // txn 2 scans index for 15445 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15445;
+  default_index_->ScanKey(*txn2, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(new_tuple_slot, results[0]);
+  results.clear();
+
+  txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
+}
+
+//    Txn #0 | Txn #1 | Txn #2 |
+//    --------------------------
+//    BEGIN  |        |        |
+//    W(X)   |        |        |
+//    R(X)   |        |        |
+//           | BEGIN  |        |
+//           | R(X)   |        |
+//    ABORT  |        |        |
+//           | R(X)   |        |
+//           | COMMIT |        |
+//           |        | BEGIN  |
+//           |        | R(X)   |
+//           |        | COMMIT |
+//
+// Txn #0 should only read Txn #0's version of X
+// Txn #1 should only read the previous version of X because Txn #0's is uncommitted
+// Txn #2 should only read the previous version of X because Txn #0 aborted
+//
+// This test confirms that we are not susceptible to the DIRTY READS and UNREPEATABLE READS anomalies
+// NOLINTNEXTLINE
+TEST_F(BPlusTreeIndexTests, AbortUpdate1) {
+  auto *insert_txn = txn_manager_->BeginTransaction();
+
+  // insert_txn inserts into table
+  auto *insert_redo =
+      insert_txn->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
+  auto *insert_tuple = insert_redo->Delta();
+  *reinterpret_cast<int32_t *>(insert_tuple->AccessForceNotNull(0)) = 15721;
+  const auto tuple_slot = sql_table_->Insert(common::ManagedPointer(insert_txn), insert_redo);
+
+  // insert_txn inserts into index
+  auto *insert_key = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+  *reinterpret_cast<int32_t *>(insert_key->AccessForceNotNull(0)) = 15721;
+  EXPECT_TRUE(default_index_->Insert(common::ManagedPointer(insert_txn), *insert_key, tuple_slot));
+
+  txn_manager_->Commit(insert_txn, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  std::vector<storage::TupleSlot> results;
+
+  auto *const scan_key_pr = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+
+  auto *txn0 = txn_manager_->BeginTransaction();
+
+  // txn 0 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  // txn 0 updates in the table, which is really a delete and insert since it's an indexed attribute
+  txn0->StageDelete(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, results[0]);
+  EXPECT_TRUE(sql_table_->Delete(common::ManagedPointer(txn0), results[0]));
+  default_index_->Delete(common::ManagedPointer(txn0), *insert_key, results[0]);
+
+  insert_redo = txn0->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
+  insert_tuple = insert_redo->Delta();
+  *reinterpret_cast<int32_t *>(insert_tuple->AccessForceNotNull(0)) = 15445;
+  const auto new_tuple_slot = sql_table_->Insert(common::ManagedPointer(txn0), insert_redo);
+
+  insert_key = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+  *reinterpret_cast<int32_t *>(insert_key->AccessForceNotNull(0)) = 15445;
+  EXPECT_TRUE(default_index_->Insert(common::ManagedPointer(txn0), *insert_key, new_tuple_slot));
+
+  // txn 1 scans index for 15721 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  // txn 1 scans index for 15445 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15445;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(new_tuple_slot, results[0]);
+  results.clear();
+
+  auto *txn1 = txn_manager_->BeginTransaction();
+
+  // txn 1 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  // txn 1 scans index for 15445 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15445;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  txn_manager_->Abort(txn0);
+
+  // txn 1 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  // txn 1 scans index for 15445 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15445;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  txn_manager_->Commit(txn1, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  auto *txn2 = txn_manager_->BeginTransaction();
+
+  // txn 2 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn2, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  // txn 2 scans index for 15445 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15445;
+  default_index_->ScanKey(*txn2, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
+}
+
+//    Txn #0 | Txn #1 | Txn #2 |
+//    --------------------------
+//    BEGIN  |        |        |
+//           | BEGIN  |        |
+//           | W(X)   |        |
+//    R(X)   |        |        |
+//           | R(X)   |        |
+//           | ABORT  |        |
+//    R(X)   |        |        |
+//    COMMIT |        |        |
+//           |        | BEGIN  |
+//           |        | R(X)   |
+//           |        | COMMIT |
+//
+// Txn #0 should only read the previous version of X because Txn #1's is uncommitted
+// Txn #1 should only read Txn #1's version of X
+// Txn #2 should only read the previous version of X because Txn #1 aborted
+//
+// This test confirms that we are not susceptible to the DIRTY READS and UNREPEATABLE READS anomalies
+// NOLINTNEXTLINE
+TEST_F(BPlusTreeIndexTests, AbortUpdate2) {
+  auto *insert_txn = txn_manager_->BeginTransaction();
+
+  // insert_txn inserts into table
+  auto *insert_redo =
+      insert_txn->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
+  auto *insert_tuple = insert_redo->Delta();
+  *reinterpret_cast<int32_t *>(insert_tuple->AccessForceNotNull(0)) = 15721;
+  const auto tuple_slot = sql_table_->Insert(common::ManagedPointer(insert_txn), insert_redo);
+
+  // insert_txn inserts into index
+  auto *insert_key = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+  *reinterpret_cast<int32_t *>(insert_key->AccessForceNotNull(0)) = 15721;
+  EXPECT_TRUE(default_index_->Insert(common::ManagedPointer(insert_txn), *insert_key, tuple_slot));
+
+  txn_manager_->Commit(insert_txn, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  std::vector<storage::TupleSlot> results;
+
+  auto *const scan_key_pr = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+
+  auto *txn0 = txn_manager_->BeginTransaction();
+  auto *txn1 = txn_manager_->BeginTransaction();
+
+  // txn 1 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+
+  // txn 1 updates in the table, which is really a delete and insert since it's an indexed attribute
+  txn1->StageDelete(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, results[0]);
+  EXPECT_TRUE(sql_table_->Delete(common::ManagedPointer(txn1), results[0]));
+  default_index_->Delete(common::ManagedPointer(txn1), *insert_key, results[0]);
+
+  insert_redo = txn1->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
+  insert_tuple = insert_redo->Delta();
+  *reinterpret_cast<int32_t *>(insert_tuple->AccessForceNotNull(0)) = 15445;
+  const auto new_tuple_slot = sql_table_->Insert(common::ManagedPointer(txn1), insert_redo);
+
+  insert_key = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+  *reinterpret_cast<int32_t *>(insert_key->AccessForceNotNull(0)) = 15445;
+  EXPECT_TRUE(default_index_->Insert(common::ManagedPointer(txn1), *insert_key, new_tuple_slot));
+
+  results.clear();
+
+  // txn 0 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  // txn 0 scans index for 15445 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15445;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  // txn 1 scans index for 15721 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  // txn 1 scans index for 15445 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15445;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(new_tuple_slot, results[0]);
+  results.clear();
+
+  txn_manager_->Abort(txn1);
+
+  // txn 0 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  // txn 0 scans index for 15445 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15445;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  txn_manager_->Commit(txn0, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  auto *txn2 = txn_manager_->BeginTransaction();
+
+  // txn 2 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn2, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  // txn 2 scans index for 15445 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15445;
+  default_index_->ScanKey(*txn2, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
+}
+
+//    Txn #0 | Txn #1 | Txn #2 |
+//    --------------------------
+//    BEGIN  |        |        |
+//    W(X)   |        |        |
+//    R(X)   |        |        |
+//           | BEGIN  |        |
+//           | R(X)   |        |
+//    COMMIT |        |        |
+//           | R(X)   |        |
+//           | COMMIT |        |
+//           |        | BEGIN  |
+//           |        | R(X)   |
+//           |        | COMMIT |
+//
+// Txn #0 should only read Txn #0's version of X
+// Txn #1 should only read the previous version of X because its start time is before #0's commit
+// Txn #2 should only read Txn #0's version of X
+//
+// This test confirms that we are not susceptible to the DIRTY READS and UNREPEATABLE READS anomalies
+// NOLINTNEXTLINE
+TEST_F(BPlusTreeIndexTests, CommitDelete1) {
+  auto *insert_txn = txn_manager_->BeginTransaction();
+
+  // insert_txn inserts into table
+  auto *insert_redo =
+      insert_txn->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
+  auto *insert_tuple = insert_redo->Delta();
+  *reinterpret_cast<int32_t *>(insert_tuple->AccessForceNotNull(0)) = 15721;
+  const auto tuple_slot = sql_table_->Insert(common::ManagedPointer(insert_txn), insert_redo);
+
+  // insert_txn inserts into index
+  auto *insert_key = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+  *reinterpret_cast<int32_t *>(insert_key->AccessForceNotNull(0)) = 15721;
+  EXPECT_TRUE(default_index_->Insert(common::ManagedPointer(insert_txn), *insert_key, tuple_slot));
+
+  txn_manager_->Commit(insert_txn, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  std::vector<storage::TupleSlot> results;
+
+  auto *const scan_key_pr = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+
+  auto *txn0 = txn_manager_->BeginTransaction();
+
+  // txn 0 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  // txn 0 deletes in the table and index
+  txn0->StageDelete(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, results[0]);
+  EXPECT_TRUE(sql_table_->Delete(common::ManagedPointer(txn0), results[0]));
+  default_index_->Delete(common::ManagedPointer(txn0), *insert_key, results[0]);
+
+  // txn 0 scans index for 15721 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  auto *txn1 = txn_manager_->BeginTransaction();
+
+  // txn 1 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  txn_manager_->Commit(txn0, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  // txn 1 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  txn_manager_->Commit(txn1, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  auto *txn2 = txn_manager_->BeginTransaction();
+
+  // txn 2 scans index for 15721 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn2, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
+}
+
+//    Txn #0 | Txn #1 | Txn #2 |
+//    --------------------------
+//    BEGIN  |        |        |
+//           | BEGIN  |        |
+//           | W(X)   |        |
+//    R(X)   |        |        |
+//           | R(X)   |        |
+//           | COMMIT |        |
+//    R(X)   |        |        |
+//    COMMIT |        |        |
+//           |        | BEGIN  |
+//           |        | R(X)   |
+//           |        | COMMIT |
+//
+// Txn #0 should only read the previous version of X because its start time is before #1's commit
+// Txn #1 should only read Txn #1's version of X
+// Txn #2 should only read Txn #1's version of X
+//
+// This test confirms that we are not susceptible to the DIRTY READS and UNREPEATABLE READS anomalies
+// NOLINTNEXTLINE
+TEST_F(BPlusTreeIndexTests, CommitDelete2) {
+  auto *insert_txn = txn_manager_->BeginTransaction();
+
+  // insert_txn inserts into table
+  auto *insert_redo =
+      insert_txn->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
+  auto *insert_tuple = insert_redo->Delta();
+  *reinterpret_cast<int32_t *>(insert_tuple->AccessForceNotNull(0)) = 15721;
+  const auto tuple_slot = sql_table_->Insert(common::ManagedPointer(insert_txn), insert_redo);
+
+  // insert_txn inserts into index
+  auto *insert_key = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+  *reinterpret_cast<int32_t *>(insert_key->AccessForceNotNull(0)) = 15721;
+  EXPECT_TRUE(default_index_->Insert(common::ManagedPointer(insert_txn), *insert_key, tuple_slot));
+
+  txn_manager_->Commit(insert_txn, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  std::vector<storage::TupleSlot> results;
+
+  auto *const scan_key_pr = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+
+  auto *txn0 = txn_manager_->BeginTransaction();
+  auto *txn1 = txn_manager_->BeginTransaction();
+
+  // txn 1 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+
+  // txn 1 deletes in the table and index
+  txn1->StageDelete(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, results[0]);
+  EXPECT_TRUE(sql_table_->Delete(common::ManagedPointer(txn1), results[0]));
+  default_index_->Delete(common::ManagedPointer(txn1), *insert_key, results[0]);
+
+  results.clear();
+
+  // txn 0 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  // txn 1 scans index for 15721 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  txn_manager_->Commit(txn1, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  // txn 0 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  txn_manager_->Commit(txn0, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  auto *txn2 = txn_manager_->BeginTransaction();
+
+  // txn 2 scans index for 15721 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn2, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
+}
+
+//    Txn #0 | Txn #1 | Txn #2 |
+//    --------------------------
+//    BEGIN  |        |        |
+//    W(X)   |        |        |
+//    R(X)   |        |        |
+//           | BEGIN  |        |
+//           | R(X)   |        |
+//    ABORT  |        |        |
+//           | R(X)   |        |
+//           | COMMIT |        |
+//           |        | BEGIN  |
+//           |        | R(X)   |
+//           |        | COMMIT |
+//
+// Txn #0 should only read Txn #0's version of X
+// Txn #1 should only read the previous version of X because Txn #0's is uncommitted
+// Txn #2 should only read the previous version of X because Txn #0 aborted
+//
+// This test confirms that we are not susceptible to the DIRTY READS and UNREPEATABLE READS anomalies
+// NOLINTNEXTLINE
+TEST_F(BPlusTreeIndexTests, AbortDelete1) {
+  auto *insert_txn = txn_manager_->BeginTransaction();
+
+  // insert_txn inserts into table
+  auto *insert_redo =
+      insert_txn->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
+  auto *insert_tuple = insert_redo->Delta();
+  *reinterpret_cast<int32_t *>(insert_tuple->AccessForceNotNull(0)) = 15721;
+  const auto tuple_slot = sql_table_->Insert(common::ManagedPointer(insert_txn), insert_redo);
+
+  // insert_txn inserts into index
+  auto *insert_key = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+  *reinterpret_cast<int32_t *>(insert_key->AccessForceNotNull(0)) = 15721;
+  EXPECT_TRUE(default_index_->Insert(common::ManagedPointer(insert_txn), *insert_key, tuple_slot));
+
+  txn_manager_->Commit(insert_txn, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  std::vector<storage::TupleSlot> results;
+
+  auto *const scan_key_pr = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+
+  auto *txn0 = txn_manager_->BeginTransaction();
+
+  // txn 0 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  // txn 0 deletes in the table and index
+  txn0->StageDelete(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, results[0]);
+  EXPECT_TRUE(sql_table_->Delete(common::ManagedPointer(txn0), results[0]));
+  default_index_->Delete(common::ManagedPointer(txn0), *insert_key, results[0]);
+
+  // txn 0 scans index for 15721 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  auto *txn1 = txn_manager_->BeginTransaction();
+
+  // txn 1 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  txn_manager_->Abort(txn0);
+
+  // txn 1 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  txn_manager_->Commit(txn1, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  auto *txn2 = txn_manager_->BeginTransaction();
+
+  // txn 2 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn2, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
+}
+
+//    Txn #0 | Txn #1 | Txn #2 |
+//    --------------------------
+//    BEGIN  |        |        |
+//           | BEGIN  |        |
+//           | W(X)   |        |
+//    R(X)   |        |        |
+//           | R(X)   |        |
+//           | ABORT  |        |
+//    R(X)   |        |        |
+//    COMMIT |        |        |
+//           |        | BEGIN  |
+//           |        | R(X)   |
+//           |        | COMMIT |
+//
+// Txn #0 should only read the previous version of X because Txn #1's is uncommitted
+// Txn #1 should only read Txn #1's version of X
+// Txn #2 should only read the previous version of X because Txn #1 aborted
+//
+// This test confirms that we are not susceptible to the DIRTY READS and UNREPEATABLE READS anomalies
+// NOLINTNEXTLINE
+TEST_F(BPlusTreeIndexTests, AbortDelete2) {
+  auto *insert_txn = txn_manager_->BeginTransaction();
+
+  // insert_txn inserts into table
+  auto *insert_redo =
+      insert_txn->StageWrite(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, tuple_initializer_);
+  auto *insert_tuple = insert_redo->Delta();
+  *reinterpret_cast<int32_t *>(insert_tuple->AccessForceNotNull(0)) = 15721;
+  const auto tuple_slot = sql_table_->Insert(common::ManagedPointer(insert_txn), insert_redo);
+
+  // insert_txn inserts into index
+  auto *insert_key = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+  *reinterpret_cast<int32_t *>(insert_key->AccessForceNotNull(0)) = 15721;
+  EXPECT_TRUE(default_index_->Insert(common::ManagedPointer(insert_txn), *insert_key, tuple_slot));
+
+  txn_manager_->Commit(insert_txn, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  std::vector<storage::TupleSlot> results;
+
+  auto *const scan_key_pr = default_index_->GetProjectedRowInitializer().InitializeRow(key_buffer_1_);
+
+  auto *txn0 = txn_manager_->BeginTransaction();
+  auto *txn1 = txn_manager_->BeginTransaction();
+
+  // txn 1 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+
+  // txn 1 deletes in the table and index
+  txn1->StageDelete(CatalogTestUtil::TEST_DB_OID, CatalogTestUtil::TEST_TABLE_OID, results[0]);
+  EXPECT_TRUE(sql_table_->Delete(common::ManagedPointer(txn1), results[0]));
+  default_index_->Delete(common::ManagedPointer(txn1), *insert_key, results[0]);
+
+  results.clear();
+
+  // txn 0 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  // txn 1 scans index for 15721 and gets no visible result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn1, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 0);
+  results.clear();
+
+  txn_manager_->Abort(txn1);
+
+  // txn 0 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn0, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  txn_manager_->Commit(txn0, transaction::TransactionUtil::EmptyCallback, nullptr);
+
+  auto *txn2 = txn_manager_->BeginTransaction();
+
+  // txn 2 scans index for 15721 and gets a visible, correct result
+  *reinterpret_cast<int32_t *>(scan_key_pr->AccessForceNotNull(0)) = 15721;
+  default_index_->ScanKey(*txn2, *scan_key_pr, &results);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(tuple_slot, results[0]);
+  results.clear();
+
+  txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
+}
+
 
 /**
  * Tests basic scan behavior using various windows to scan over (some out of of bounds of keyspace, some matching
