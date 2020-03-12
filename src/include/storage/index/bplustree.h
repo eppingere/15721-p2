@@ -1092,7 +1092,7 @@ class BPlusTree {
 
   }
 
-  void ScanKey(KeyType key, std::vector<ValueType> *values, std::function<bool(ValueType)> predicate) {
+  void ScanKey(KeyType key, std::vector<ValueType> *values, std::function<bool(ValueType)> predicate = [] (ValueType v) { return true; }) {
     uint64_t epoch = StartFunction();
     ScanKeyHelper(key, values, predicate);
     EndFunction(epoch);
