@@ -64,7 +64,7 @@ class BPlusTreeIndex final : public Index {
     // Register an abort action with the txn context in case of rollback
     txn->RegisterAbortAction([=]() {
       // FIXME(15-721 project2): perform a delete from the underlying data structure of the key/value pair
-      const bool UNUSED_ATTRIBUTE result = true;
+      const bool UNUSED_ATTRIBUTE result = bplustree_->Remove(index_key, location);
 
       TERRIER_ASSERT(result, "Delete on the index failed.");
     });
@@ -96,7 +96,7 @@ class BPlusTreeIndex final : public Index {
       // Register an abort action with the txn context in case of rollback
       txn->RegisterAbortAction([=]() {
         // FIXME(15-721 project2): perform a delete from the underlying data structure of the key/value pair
-        const bool UNUSED_ATTRIBUTE result = true;
+        const bool UNUSED_ATTRIBUTE result = bplustree_->Remove(index_key, location);
         TERRIER_ASSERT(result, "Delete on the index failed.");
       });
     } else {
@@ -122,7 +122,7 @@ class BPlusTreeIndex final : public Index {
     txn->RegisterCommitAction([=](transaction::DeferredActionManager *deferred_action_manager) {
       deferred_action_manager->RegisterDeferredAction([=]() {
         // FIXME(15-721 project2): perform a delete from the underlying data structure of the key/value pair
-        const bool UNUSED_ATTRIBUTE result = true;
+        const bool UNUSED_ATTRIBUTE result = bplustree_->Remove(index_key, location);
 
         TERRIER_ASSERT(result, "Deferred delete on the index failed.");
       });

@@ -1100,15 +1100,21 @@ class BPlusTree {
 
   bool RemoveHelper(KeyType key, ValueType value) {
     bool done = false;
-    for (LeafNode* leaf = FindMinLeaf(key); leaf != nullptr && !done; leaf = leaf->right_) {
-      BaseNode::ScopedWriteLatch (leaf);
-      for (uint16_t i = 0; i < leaf->size_; i++) {
-        if (leaf->IsReadable(i)) {
-          if (KeyCmpEqual(key, leaf->keys_[i]) && value_eq_obj_(value, leaf->values_[i])) {
-            leaf->MarkTombStone(i);
-            return true;
-          } else if (KeyCmpLess(key, leaf->keys_[i])) {
-            done = true;
+    while (true) {
+    Loop:
+      for (LeafNode *leaf = FindMinLeaf(key); leaf != nullptr && !done; leaf = leaf->right_) {
+        typename BaseNode::ScopedWriteLatch l(leaf);
+        if (leaf->deleted_) {
+          goto Loop;
+        }
+        for (uint16_t i = 0; i < leaf->size_; i++) {
+          if (leaf->IsReadable(i)) {
+            if (KeyCmpEqual(key, leaf->keys_[i]) && value_eq_obj_(value, leaf->values_[i])) {
+              leaf->MarkTombStone(i);
+              return true;
+            } else if (KeyCmpLess(key, leaf->keys_[i])) {
+              done = true;
+            }
           }
         }
       }
@@ -1182,7 +1188,7 @@ class BPlusTree {
 
   LeafNode* FindMinLeaf() {
     while (true) {
-      OuterLoop:
+    OuterLoop:
       BaseNode *n = root_;
       if (UNLIKELY(n->deleted_)) {
         goto OuterLoop;
@@ -1217,9 +1223,10 @@ class BPlusTree {
     }
   }
 
+
   LeafNode* FindMaxLeaf() {
     while (true) {
-      OuterLoop:
+    OuterLoop:
       BaseNode *n = root_;
       if (UNLIKELY(n->deleted_)) {
         goto OuterLoop;
@@ -1237,7 +1244,7 @@ class BPlusTree {
 
   LeafNode* FindMaxLeaf(KeyType key) {
     while (true) {
-      OuterLoop:
+    OuterLoop:
       BaseNode *n = root_;
       if (UNLIKELY(n->deleted_)) {
         goto OuterLoop;
