@@ -1004,7 +1004,6 @@ class BPlusTree {
       old_node->ReleaseWriteLatch();
     }
 
-    int which_case = 0;
     if (old_node->size_ < old_node->limit_) {
 //      TERRIER_ASSERT(old_node->write_latch, "must hold write latch if not full");
       InnerNode* new_node = new InnerNode(this);
@@ -1026,14 +1025,12 @@ class BPlusTree {
       old_node->ReleaseWriteLatch();
 
       if (old_node == root_) {
-        which_case = 1;
         TERRIER_ASSERT(holds_tree_latch && locked_nodes.empty(),
             "must hold tree latch if held latch on root");
         root_ = new_node;
         UnlatchRoot();
         holds_tree_latch = false;
       } else {
-        which_case = 2;
         TERRIER_ASSERT(!holds_tree_latch || !locked_nodes.empty(),
                        "if we are not at the root then we should not hold the tree latch"
                        "and should have released some write latches");
@@ -1051,7 +1048,6 @@ class BPlusTree {
         }
       }
     } else {
-      which_case = 3;
       TERRIER_ASSERT(locked_nodes.empty() && old_node == root_ && holds_tree_latch,
           "we should have split all the way to the top");
       auto new_root = new InnerNode(this);
