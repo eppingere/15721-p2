@@ -36,7 +36,7 @@ class BPlusTreeIndexTests : public TerrierTest {
  public:
   std::default_random_engine generator_;
   const uint32_t num_threads_ = 12;
-  const uint32_t num_inserts_ = 1000;  // number of tuples/primary keys for each worker to attempt to insert
+  const uint32_t num_inserts_ = 100000;  // number of tuples/primary keys for each worker to attempt to insert
 
   std::unique_ptr<DBMain> db_main_;
   common::ManagedPointer<transaction::TransactionManager> txn_manager_;
