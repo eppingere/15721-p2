@@ -133,8 +133,6 @@ class BPlusTreeIndex final : public Index {
                std::vector<TupleSlot> *value_list) final {
     TERRIER_ASSERT(value_list->empty(), "Result set should begin empty.");
 
-    std::vector<TupleSlot> results;
-
     // Build search key
     KeyType index_key;
     index_key.SetFromProjectedRow(key, metadata_, metadata_.GetSchema().GetColumns().size());
@@ -142,15 +140,11 @@ class BPlusTreeIndex final : public Index {
     // Perform lookup in BPlusTree
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
 
-    bplustree_->ScanKey(index_key, &results);
+    std::function<bool(TupleSlot)> predicate = [&] (TupleSlot tuple) {
+      return IsVisible(txn, tuple);
+    };
 
-    // Avoid resizing our value_list, even if it means over-provisioning
-    value_list->reserve(results.size());
-
-    // Perform visibility check on result
-    for (const auto &result : results) {
-      if (IsVisible(txn, result)) value_list->emplace_back(result);
-    }
+    bplustree_->ScanKey(index_key, value_list, predicate);
 
     TERRIER_ASSERT(!(metadata_.GetSchema().Unique()) || (metadata_.GetSchema().Unique() && value_list->size() <= 1),
                    "Invalid number of results for unique index.");
@@ -174,30 +168,27 @@ class BPlusTreeIndex final : public Index {
 
 
     uint64_t epoch = bplustree_->StartFunction();
-    void *leaf_ptr;
-    if (low_key_exists) {
-      leaf_ptr = bplustree_->FindMinLeaf(index_low_key);
-    } else {
-      leaf_ptr = bplustree_->FindMinLeaf();
-    }
-    auto *leaf = static_cast<typename BPlusTree<KeyType, TupleSlot>::LeafNode *>(leaf_ptr);
+
+    std::function<bool(std::pair<KeyType, TupleSlot>)> predicate = [&] (std::pair<KeyType, TupleSlot> p) {
+      return IsVisible(txn, p.second) &&
+            (!high_key_exists || p.first.PartialLessThan(index_high_key, &metadata_, num_attrs)) &&
+            (!low_key_exists || index_low_key.PartialLessThan(p.first, &metadata_, num_attrs));
+    };
 
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
-    bool done = false;
-    for (; !done && (limit == 0 || value_list->size() < limit) && leaf != nullptr; leaf = leaf->right_) {
-      for (uint16_t i = 0; i < leaf->size_; i++) {
-        if (leaf->IsReadable(i)) {
-          if (IsVisible(txn, leaf->values_[i]) &&
-            (!high_key_exists || leaf->keys_[i].PartialLessThan(index_high_key, &metadata_, num_attrs)) &&
-            (!low_key_exists || index_low_key.PartialLessThan(leaf->keys_[i], &metadata_, num_attrs))) {
-            value_list->emplace_back(leaf->values_[i]);
-          } else if (high_key_exists && !leaf->keys_[i].PartialLessThan(index_high_key, &metadata_, num_attrs)) {
-            done = true;
-          }
-        }
+    for (auto* leaf = low_key_exists ? bplustree_->FindMinLeaf(index_high_key) : bplustree_->FindMinLeaf();
+          leaf != nullptr && (limit == 0 || value_list->size() < limit);
+          leaf = leaf->right_) {
+      if (!leaf->ScanRange(index_low_key, &index_high_key, value_list, predicate)) {
+        break;
       }
     }
+
+
+    while (limit != 0 && value_list->size() > limit) value_list->pop_back();
+
     bplustree_->EndFunction(epoch);
+
   }
 
   void ScanDescending(const transaction::TransactionContext &txn, const ProjectedRow &low_key,
@@ -213,23 +204,18 @@ class BPlusTreeIndex final : public Index {
     // Perform lookup in BwTree
 
     uint64_t epoch = bplustree_->StartFunction();
-    void *leaf_ptr = bplustree_->FindMaxLeaf(index_high_key);
-    auto *leaf = static_cast<typename BPlusTree<KeyType, TupleSlot>::LeafNode *>(leaf_ptr);
+
+    std::function<bool(TupleSlot)> predicate = [&] (TupleSlot tuple) {
+      return IsVisible(txn, tuple);
+    };
 
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
-    bool done = false;
-    for (; !done && leaf != nullptr; leaf = leaf->right_) {
-      for (uint16_t i = leaf->size_ - 1; i < leaf->size_; i--) {
-        if (leaf->IsReadable(i)) {
-          if (IsVisible(txn, leaf->values_[i]) && bplustree_->KeyCmpLessEqual(index_low_key, leaf->keys_[i]) &&
-              bplustree_->KeyCmpLessEqual(leaf->keys_[i], index_high_key)) {
-            value_list->emplace_back(leaf->values_[i]);
-          } else if (bplustree_->KeyCmpGreater(leaf->keys_[i], index_high_key)) {
-            done = true;
-          }
-        }
+    for (auto* leaf = bplustree_->FindMaxLeaf(index_high_key); leaf != nullptr; leaf = leaf->left_) {
+      if (!leaf->ScanRangeReverse(index_low_key, &index_high_key, value_list, predicate)) {
+        break;
       }
     }
+
     bplustree_->EndFunction(epoch);
   }
 
@@ -245,23 +231,22 @@ class BPlusTreeIndex final : public Index {
     index_high_key.SetFromProjectedRow(high_key, metadata_, metadata_.GetSchema().GetColumns().size());
 
     uint64_t epoch = bplustree_->StartFunction();
-    void *leaf_ptr = bplustree_->FindMaxLeaf(index_high_key);
-    auto *leaf = static_cast<typename BPlusTree<KeyType, TupleSlot>::LeafNode *>(leaf_ptr);
+
+    std::function<bool(TupleSlot)> predicate = [&] (TupleSlot tuple) {
+      return IsVisible(txn, tuple);
+    };
 
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
-    bool done = false;
-    for (; !done && leaf != nullptr; leaf = leaf->right_) {
-      for (uint16_t i = leaf->size_ - 1; i < leaf->size_ && value_list->size() < limit; i--) {
-        if (leaf->IsReadable(i)) {
-          if (IsVisible(txn, leaf->values_[i]) && bplustree_->KeyCmpLessEqual(index_low_key, leaf->keys_[i]) &&
-              bplustree_->KeyCmpLessEqual(leaf->keys_[i], index_high_key)) {
-            value_list->emplace_back(leaf->values_[i]);
-          } else if (bplustree_->KeyCmpGreater(leaf->keys_[i], index_high_key)) {
-            done = true;
-          }
+    for (auto* leaf = bplustree_->FindMaxLeaf(index_high_key); leaf != nullptr && value_list->size() < limit; leaf = leaf->left_) {
+        if (!leaf->ScanRangeReverse(index_low_key, &index_high_key, value_list, predicate)) {
+          break;
         }
-      }
     }
+
+    while (value_list->size() > limit) {
+      value_list->pop_back();
+    }
+
     bplustree_->EndFunction(epoch);
   }
 };
