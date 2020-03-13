@@ -59,7 +59,7 @@ template <typename KeyType, typename ValueType, typename KeyComparator = std::le
 class BPlusTree {
  public:
   /*
-   * Constructor - Set up initial environment for BwTree
+   * Constructor - Set up initial environment for BPlusTree
    *
    * Any tree instance will start with an empty leaf node as the root, which will then be filled.
    *
@@ -76,10 +76,15 @@ class BPlusTree {
     root_ = static_cast<BaseNode *>(new LeafNode(this));
   }
 
-  // Key comparator, and key and value equality checker
-  KeyComparator key_cmp_obj_;
-  KeyEqualityChecker key_eq_obj_;
-  ValueEqualityChecker value_eq_obj_;
+  // Tunable parameters
+  static const uint64_t BITS_IN_UINT64 = 8 * sizeof(uint64_t);
+  static const uint16_t BRANCH_FACTOR = 20;
+  static const uint16_t INNER_NODE_OPTIMAL_FILL = BRANCH_FACTOR / 2;
+  static const uint16_t LEAF_SIZE = 20;  // cannot ever be less than 3
+  static const uint16_t LEAF_OPTIMAL_FILL = LEAF_SIZE / 2;
+  static const uint64_t ALLOCATOR_START_SIZE = 10;
+  static const uint64_t MAX_NUM_ACTIVE_EPOCHS = static_cast<uint64_t>(0x1) << 3;
+  static const uint64_t NODE_TYPE_MASK = static_cast<uint64_t>(0x01) << 62;
 
   /*
    * KeyCmpLess() - Compare two keys for "less than" relation
@@ -120,92 +125,99 @@ class BPlusTree {
    */
   bool KeyCmpLessEqual(const KeyType &key1, const KeyType &key2) const { return !KeyCmpGreater(key1, key2); }
 
-  // Tunable parameters
-  static const uint64_t BITS_IN_UINT64 = 8 * sizeof(uint64_t);
-  static const uint16_t BRANCH_FACTOR = 20;
-  static const uint16_t INNER_NODE_OPTIMAL_FILL = BRANCH_FACTOR / 2;
-  static const uint16_t LEAF_SIZE = 20;  // cannot ever be less than 3
-  static const uint16_t LEAF_OPTIMAL_FILL = LEAF_SIZE / 2;
-  static const uint64_t ALLOCATOR_START_SIZE = 10;
-  static const uint64_t MAX_NUM_ACTIVE_EPOCHS = static_cast<uint64_t>(0x1) << 3;
-  static const uint64_t WRITE_LOCK_MASK = static_cast<uint64_t>(0x01) << 63;
-  static const uint64_t NODE_TYPE_MASK = static_cast<uint64_t>(0x01) << 62;
-  static const uint64_t IS_DELETED_MASK = static_cast<uint64_t>(0x01) << 61;
-  static const uint64_t DELETE_EPOCH_MASK = ~(static_cast<uint64_t>(0xE) << 60);
-
-  // Node types
+  /*
+   * NodeType : an alias for our two node types
+   */
   enum class NodeType : bool {
     LEAF = true,
     INNER_NODE = false,
   };
 
+  /*
+   * OptimisticResult: is a return value for the different results than an optimistic function can take on
+   */
   enum class OptimisticResult : uint8_t {
     Success = 0,
     Failure = 1,
     RetryableFailure = 2,
   };
 
+  class BPlusTreeLatch {
+   public:
+    void Lock() { latch_.Lock(); }
+    void Unlock() { latch_.Unlock(); }
+   private:
+    common::SpinLatch latch_;
+  };
+
+  /*
+   * BaseNode is a super class for our two node types. It contains all their shared metadata as well as functions that
+   * are shared among them. All nodes do not require latches when being read. Only require latches when being written
+   * to.
+   */
   class BaseNode {
    public:
     BaseNode() {}
 
     BaseNode(BPlusTree *tree, BPlusTree::NodeType t)
         : tree_(tree),
-          info_(t == NodeType::LEAF ? NODE_TYPE_MASK : 0),
+          type_(t),
           size_(0),
           limit_(t == NodeType::LEAF ? LEAF_SIZE : BRANCH_FACTOR - 1) {}
     ~BaseNode() = default;
 
     BPlusTree *tree_;
-//    std::atomic<bool> write_latch = false;
-    common::SpinLatch write_latch;
+    BPlusTreeLatch write_latch_;
     std::atomic<bool> deleted_ = false;
     std::atomic<uint64_t> deleted_epoch_ = 0;
-    std::atomic<uint64_t> info_;
+    NodeType type_;
     std::atomic<uint16_t> size_, limit_;
 
-    NodeType GetType() { return static_cast<NodeType>((info_ & NODE_TYPE_MASK) >> 62); }
+    NodeType GetType() { return type_; }
 
     void MarkDeleted() {
       deleted_ = true;
       deleted_epoch_ = tree_->epoch_.load();
     }
 
-    //
     void Reallocate() {
-      write_latch = false;
+      write_latch_ = false;
       deleted_ = false;
-      info_ = GetType() == NodeType::LEAF ? NODE_TYPE_MASK : 0;
       deleted_epoch_ = 0;
       size_ = 0;
     }
 
-    void GetWriteLatch() {
+    void Lock() {
 //      bool t = true;
 //      bool f = false;
-//      while (!write_latch.compare_exchange_strong(f, t)) {}
-//      TERRIER_ASSERT(write_latch, "should hold latch when latched");
-      write_latch.Lock();
+//      while (!write_latch_.compare_exchange_strong(f, t)) {}
+//      TERRIER_ASSERT(write_latch_, "should hold latch when latched");
+      write_latch_.Lock();
     }
-    void ReleaseWriteLatch() {
-//      TERRIER_ASSERT(write_latch, "should only be unlatching when latch is held");
-//      write_latch = false;
-//      TERRIER_ASSERT(!write_latch, "should actually release write latch");
-      write_latch.Unlock();
+    void Unlock() {
+//      TERRIER_ASSERT(write_latch_, "should only be unlatching when latch is held");
+//      write_latch_ = false;
+//      TERRIER_ASSERT(!write_latch_, "should actually release write latch");
+      write_latch_.Unlock();
     }
 
     class ScopedWriteLatch {
      public:
-      ScopedWriteLatch(BaseNode* node) : node_(node) {
-        node_->GetWriteLatch();
+      ScopedWriteLatch(BaseNode* node) : node_(node) { node_->Lock();
       }
-      ~ScopedWriteLatch() {
-        node_->ReleaseWriteLatch();
+      ~ScopedWriteLatch() { node_->Unlock();
       }
       BaseNode* node_;
     };
   };
 
+  /*
+   * InnerNode: is a subclass of BaseNode. It serves as as BRANCH_FACTOR-way inner node of the tree. It contains
+   * (BRANCH_FACTOR - 1) many keys that partition the ranges that inhabit its children. In inner node size tracks the
+   * number of keys in the tree, which is on less than the number of children. Each key k at index i partitions children
+   * at index i to contain keys less than k (if there are duplicate keys that span across the children at i and i+1 then
+   * the ith child can contain keys less or equal to k) and index i+1 to contain keys greater or equal to k.
+   */
   class InnerNode : public BaseNode {
    public:
     InnerNode() = default;
@@ -213,6 +225,9 @@ class BPlusTree {
     InnerNode(BPlusTree *tree) : BaseNode(tree, NodeType::INNER_NODE) {}
     ~InnerNode() = default;
 
+    /// FindMinChild: Finds the left-most child of this that could contain the given key
+    /// \param key : the given key
+    /// \return an index into children_ of the left-most child of this node that could contain the given key
     uint16_t FindMinChild(KeyType key) {
       uint16_t i;
       for (i = 0; i < this->size_.load(); i++)
@@ -221,6 +236,9 @@ class BPlusTree {
       return i;
     }
 
+    /// FindMaxChild: Finds the right-most child of this that could contain the given key
+    /// \param key : the given key
+    /// \return an index into children_ of the right-most child of this node that could contain the given key
     BaseNode *FindMaxChild(KeyType key) {
       for (uint16_t i = this->size_ - 1; i < this->size_; i--)
         if (this->tree_->KeyCmpGreaterEqual(key, keys_[i])) return children_[i + 1];
@@ -228,6 +246,9 @@ class BPlusTree {
       return children_[0];
     }
 
+    /// InsertInner adds to the node this new key and its right child. Can only be called on not visible nodes.
+    /// \param key
+    /// \param child the right child of the given key
     void InsertInner(KeyType key, BaseNode *child) {
       uint16_t j;
       for (j = 0; j < this->size_ && this->tree_->KeyCmpGreater(key, keys_[j]); j++) {
@@ -244,6 +265,9 @@ class BPlusTree {
       this->size_++;
     }
 
+    /// Merge generates a pointer to a merged version of this. Requires lock to be held on parent or the root if root
+    /// \return a pointer to a new node that balances this node and its children. Marks this node and all children
+    /// as deleted
     InnerNode* Merge() {
       typename BaseNode::ScopedWriteLatch l(this);
       TERRIER_ASSERT(!this->deleted_, "we should never merge a deleted node");
@@ -254,9 +278,9 @@ class BPlusTree {
       while (true) {
         if (children_[0].load()->GetType() == NodeType::LEAF && static_cast<LeafNode*>(children_[0].load())->left_ != nullptr) {
           left = static_cast<LeafNode*>(children_[0].load())->left_;
-          left->GetWriteLatch();
+          left->Lock();
           if (left->deleted_ || left != static_cast<LeafNode*>(children_[0].load())->left_) {
-            left->ReleaseWriteLatch();
+            left->Unlock();
           }
           left_locked = true;
         }
@@ -264,15 +288,15 @@ class BPlusTree {
       }
 
       for (uint16_t i = 0; i < this->size_; i++) {
-        children_[i].load()->GetWriteLatch();
+        children_[i].load()->Lock();
       }
 
       while (true) {
         if (children_[this->size_].load()->GetType() == NodeType::LEAF && static_cast<LeafNode*>(children_[this->size_].load())->right_ != nullptr) {
           right = static_cast<LeafNode*>(children_[this->size_].load())->right_;
-          right->GetWriteLatch();
+          right->Lock();
           if (right->deleted_ || right != static_cast<LeafNode*>(children_[this->size_].load())->right_) {
-            right->ReleaseWriteLatch();
+            right->Unlock();
           }
           right_locked = true;
         }
@@ -288,20 +312,22 @@ class BPlusTree {
       }
 
       if (left_locked) {
-        left->ReleaseWriteLatch();
+        left->Unlock();
       }
       for (uint16_t i = 0; i < this->size_; i++) {
         children_[i].load()->MarkDeleted();
-        children_[i].load()->ReleaseWriteLatch();
+        children_[i].load()->Unlock();
       }
       if (right_locked) {
-        right->ReleaseWriteLatch();
+        right->Unlock();
       }
 
       this->MarkDeleted();
       return new_node;
     }
 
+    /// MergeAboveInnerNodes helper function for Merge. Implements merge if the innernode's children are innernodes
+    /// \return pointer to merged node
     InnerNode *MergeAboveInnerNodes() {
       std::vector<std::pair<KeyType, BaseNode*>> kvps;
 
@@ -361,6 +387,8 @@ class BPlusTree {
       return new_node;
     }
 
+    /// MergeAboveLeaves helper function for Merge. Implements merge if the innernode's children are leaves
+    /// \return pointer to merged node
     InnerNode *MergeAboveLeaves() {
       std::vector<std::pair<KeyType, ValueType>> kvps;
       for (uint16_t i = 0; i < this->size_; i++) {
@@ -438,6 +466,11 @@ class BPlusTree {
     KeyType keys_[BRANCH_FACTOR - 1];
   };
 
+  /*
+   * LeafNode: is a subclass of BaseNode. All the instances in the tree create a linked list of nodes along the bottom
+   * of the tree. It contains LEAF_NODE_SIZE many key value pairs. Pairs are not sorted inside of leaves. Deleted paris
+   * are marked as tomb stoned using a bitmap.
+   */
   class LeafNode : public BaseNode {
    public:
     LeafNode() = default;
@@ -445,6 +478,11 @@ class BPlusTree {
     LeafNode(BPlusTree *tree) : BaseNode(tree, NodeType::LEAF), left_(nullptr), right_(nullptr) {}
     ~LeafNode() = default;
 
+    /// ScanPredicate scans from this node to the right and evauates the given predicate on each equal key
+    /// \param key
+    /// \param predicate
+    /// \return bool representing whether the predicate returned true on any key in this node or any node to the right
+    /// of this node
     bool ScanPredicate(KeyType key, std::function<bool(const ValueType)> predicate) {
       LeafNode *current_leaf = this;
       bool no_bigger_keys = true;
@@ -464,11 +502,18 @@ class BPlusTree {
       return false;
     }
 
-    bool InsertLeaf(KeyType key, ValueType value, std::function<bool(const ValueType)> predicate,
+    /// InsertLeaf inserts given key and value into this node. Will only do so if the given predicate returns false on
+    /// all pairs with equal keys. Returns a bool indicating whether the insert succeded
+    /// \param key
+    /// \param value
+    /// \param predicate
+    /// \param predicate_satisfied return parameter of whether the predicate returned true on a equal key or not
+    /// \return bool indicating whether the insert succeded
+    OptimisticResult InsertLeaf(KeyType key, ValueType value, std::function<bool(const ValueType)> predicate,
                     bool *predicate_satisfied) {
       typename BaseNode::ScopedWriteLatch l(this);
       if (UNLIKELY(this->deleted_)) {
-        return false;
+        return OptimisticResult::RetryableFailure;
       }
 
       *predicate_satisfied = false;
@@ -477,7 +522,7 @@ class BPlusTree {
         if (IsReadable(i)) {
           if (this->tree_->KeyCmpEqual(key, keys_[i]) && predicate(values_[i])) {
             *predicate_satisfied = true;
-            return false;
+            return OptimisticResult::Failure;
           } else if (this->tree_->KeyCmpGreater(keys_[i], key)) {
             saw_bigger = true;
           }
@@ -486,7 +531,12 @@ class BPlusTree {
 
       LeafNode *right = right_;
       if (!saw_bigger && right != nullptr && (*predicate_satisfied = right->ScanPredicate(key, predicate))) {
-        return false;
+        return OptimisticResult::Failure;
+      }
+
+      // TODO(deepayan): see if insert to the right works out instead of forcing split here
+      if (this->size_ >= this->limit_) {
+        return OptimisticResult::Failure;
       }
 
       // look for deleted slot
@@ -496,20 +546,22 @@ class BPlusTree {
         keys_[i] = key;
         values_[i] = value;
         UnmarkTombStone(i);
-        return true;
-      }
-
-      // TODO(deepayan): see if insert to the right works out instead of forcing split here
-      if (this->size_ >= this->limit_) {
-        return false;
+        return OptimisticResult::Success;
       }
 
       keys_[this->size_] = key;
       values_[this->size_] = value;
+      UnmarkTombStone(this->size_);
       this->size_++;
-      return true;
+      return OptimisticResult::Success;
     }
 
+    /// ScanRange collects all values corresponding to keys between lo and hi where predicate returns true on the pair
+    /// \param low
+    /// \param hi
+    /// \param values return parameter in which result values are added
+    /// \param predicate
+    /// \return bool indicating whether the range ends in this node or could continue in the next node
     bool ScanRange(KeyType low, KeyType *hi, std::vector<ValueType> *values, std::function<bool(std::pair<KeyType, ValueType>)> predicate) {
       bool res = true;
       std::vector<std::pair<KeyType, ValueType>> temp_values;
@@ -536,6 +588,12 @@ class BPlusTree {
       return res;
     }
 
+    /// ScanRange collects all values corresponding to keys between lo and hi where predicate returns true on the value
+    /// \param low
+    /// \param hi
+    /// \param values return parameter in which result values are added
+    /// \param predicate
+    /// \return bool indicating whether the range ends in this node or could continue in the next node
     bool ScanRangeReverse(KeyType low, KeyType *hi, std::vector<ValueType> *values, std::function<bool(ValueType)> predicate) {
       bool res = true;
       std::vector<std::pair<KeyType, ValueType>> temp_values;
@@ -561,11 +619,16 @@ class BPlusTree {
       return res;
     }
 
-    // the tomb stoning could be made faster with better bit stuff
+    // TODO(emmanuel) use better bit ops???
+    /// IsReadable returns true if the key value pair at the given slot is readable or is tombstoned
+    /// \param i index of pair
+    /// \return bool representing wheter pair is readable or tombstoned
     bool IsReadable(uint16_t  i) {
       return !static_cast<bool>((tomb_stones_[i / BITS_IN_UINT64] >> (i % BITS_IN_UINT64)) & static_cast<uint64_t>(0x1));
     }
 
+    /// MarkTombStone marks the pair at the given index as deleted
+    /// \param i index of pair
     void MarkTombStone(uint16_t i) {
       while (true) {
         uint64_t old_value = tomb_stones_[i / BITS_IN_UINT64];
@@ -575,6 +638,8 @@ class BPlusTree {
       }
     }
 
+    /// UnmarkTombStone unmarks the pair at the given index as marked
+    /// \param i index of pair
     void UnmarkTombStone(uint16_t i) {
       while (true) {
         uint64_t old_value = tomb_stones_[i / BITS_IN_UINT64];
@@ -584,11 +649,10 @@ class BPlusTree {
       }
     }
 
-    // at least as many bits as key value pairs in leaf
-    std::atomic<uint64_t> tomb_stones_[(LEAF_SIZE + BITS_IN_UINT64 - 1) / BITS_IN_UINT64] = {};
     std::atomic<LeafNode *> left_, right_;
-    KeyType keys_[LEAF_SIZE] = {};
+    std::atomic<uint64_t> tomb_stones_[(LEAF_SIZE + BITS_IN_UINT64 - 1) / BITS_IN_UINT64] = {};
     ValueType values_[LEAF_SIZE] = {};
+    KeyType keys_[LEAF_SIZE] = {};
   };
 
 //  class InnerNodeAllocator {
@@ -820,20 +884,83 @@ class BPlusTree {
     ReclaimOldNodes();
   }
 
+  /// StartFunction records that a function was started. Returns the epoch in which the function was started
+  /// \return the epoch in which the function was started
   uint64_t StartFunction() {
     uint64_t current_epoch = epoch_;
     active_epochs_[current_epoch % MAX_NUM_ACTIVE_EPOCHS]++;
     return current_epoch;
   }
 
+  /// EndFunction marks that a function that was started at the given epoch has ended
+  /// \param start_epoch epoch in which the function was started
   void EndFunction(uint64_t start_epoch) {
     active_epochs_[start_epoch % MAX_NUM_ACTIVE_EPOCHS]--;
   }
 
+  /// OptimisticInsert inserts under the assumption that the leaf node into which the pair is inserted will not split
+  /// evaluates the predicate on all values that have equal keys
+  /// \param predicate predicate to be evaluated on all equal keys
+  /// \param key
+  /// \param val
+  /// \param predicate_satisfied bool representing whether the predicate returned true on the value of an equal key
+  /// \return bool representing whether the insert succeeded
   inline bool OptimisticInsert(std::function<bool(const ValueType)> predicate, KeyType key, ValueType val, bool *predicate_satisfied) {
-    return FindMinLeaf(key)->InsertLeaf(key, val, predicate, predicate_satisfied);
+    OptimisticResult result = FindMinLeaf(key)->InsertLeaf(key, val, predicate, predicate_satisfied);
+    while (result == OptimisticResult::RetryableFailure) {
+      result = FindMinLeaf(key)->InsertLeaf(key, val, predicate, predicate_satisfied);
+    }
+    if (result == OptimisticResult::Success) return true;
+    return false;
   }
 
+  BaseNode* CrabbingTraversal(KeyType key, std::vector<InnerNode *> *locked_nodes, std::vector<uint16_t> *traversal_indices, bool *holds_tree_latch) {
+    LatchRoot();
+    *holds_tree_latch = true;
+    BaseNode *n = this->root_;
+    TERRIER_ASSERT(!n->deleted_, "we should never traverse deleted nodes");
+
+    // Find minimum leaf that stores would store key, taking locks as we go down tree
+    while (n->GetType() != NodeType::LEAF) {
+      auto inner_n = static_cast<InnerNode *>(n);
+      inner_n->Lock();
+      if (n->size_ < n->limit_) {
+        if (holds_tree_latch && locked_nodes->size() > 1) {
+          UnlatchRoot();
+          *holds_tree_latch = false;
+        }
+        for (uint64_t i = 0; (!locked_nodes->empty()) && i < locked_nodes->size() - 1; i++) {
+          locked_nodes->at(i)->Unlock();
+        }
+        if (!locked_nodes->empty()) {
+          InnerNode * last = locked_nodes->back();
+          uint16_t last_index = traversal_indices->back();
+          locked_nodes->clear();
+          traversal_indices->clear();
+          locked_nodes->emplace_back(last);
+          traversal_indices->emplace_back(last_index);
+        }
+
+      }
+      uint16_t child_index = inner_n->FindMinChild(key);
+      n = inner_n->children_[child_index];
+      locked_nodes->emplace_back(inner_n);
+      traversal_indices->emplace_back(child_index);
+      TERRIER_ASSERT(!n->deleted_, "we should never traverse deleted nodes");
+    }
+    TERRIER_ASSERT(!n->deleted_, "we should never traverse deleted nodes");
+    return n;
+  }
+
+  /// InsertHelper Helper function for insert. Actually implements the insertion. Calls Optimistic insert. If
+  /// OptimisticInsert insert fails it takes write locks down the tree using lock crabbing and preforms a split leaf
+  /// node and all necessary ancestors.
+  /// \param predicate must return false values associated with all equal keys for insert to succeed
+  /// \param key
+  /// \param val
+  /// \param predicate_satisfied return value indicating whether the predicate returned true on values associated with
+  /// equal keys
+  /// \return bool indicating whether the insert succeeded
   bool InsertHelper(std::function<bool(const ValueType)> predicate, KeyType key, ValueType val, bool *predicate_satisfied) {
     if (OptimisticInsert(predicate, key, val, predicate_satisfied)) {
       return true;
@@ -841,23 +968,24 @@ class BPlusTree {
 
     std::vector<InnerNode *> locked_nodes;
     std::vector<uint16_t> traversal_indices;
+    bool holds_tree_latch;
 
     LatchRoot();
-    bool holds_tree_latch = true;
+    holds_tree_latch = true;
     BaseNode *n = this->root_;
     TERRIER_ASSERT(!n->deleted_, "we should never traverse deleted nodes");
 
     // Find minimum leaf that stores would store key, taking locks as we go down tree
     while (n->GetType() != NodeType::LEAF) {
       auto inner_n = static_cast<InnerNode *>(n);
-      inner_n->GetWriteLatch();
+      inner_n->Lock();
       if (n->size_ < n->limit_) {
         if (holds_tree_latch && locked_nodes.size() > 1) {
           UnlatchRoot();
           holds_tree_latch = false;
         }
         for (uint64_t i = 0; (!locked_nodes.empty()) && i < locked_nodes.size() - 1; i++) {
-          locked_nodes[i]->ReleaseWriteLatch();
+          locked_nodes[i]->Unlock();
         }
         if (!locked_nodes.empty()) {
           InnerNode * last = locked_nodes.back();
@@ -877,19 +1005,14 @@ class BPlusTree {
     }
     TERRIER_ASSERT(!n->deleted_, "we should never traverse deleted nodes");
 
-//    for (InnerNode* node : locked_nodes)
-//      TERRIER_ASSERT(node->write_latch, "locked nodes should actually be locked");
-
-
     // If leaf is not full, insert, unlock all parent nodes and return
     auto leaf = static_cast<LeafNode *>(n);
-    if (leaf->InsertLeaf(key, val, predicate, predicate_satisfied) || *predicate_satisfied) {
+    if (leaf->InsertLeaf(key, val, predicate, predicate_satisfied) == OptimisticResult::Success|| *predicate_satisfied) {
       if (holds_tree_latch) {
         UnlatchRoot();
         holds_tree_latch = false;
       }
-      for (InnerNode* node : locked_nodes)
-        node->ReleaseWriteLatch();
+      for (InnerNode* node : locked_nodes) node->Unlock();
 
       return !(*predicate_satisfied);
     }
@@ -901,21 +1024,21 @@ class BPlusTree {
       left = leaf->left_.load();
       right = leaf->right_.load();
       if (LIKELY(left != nullptr)) {
-        left->GetWriteLatch();
+        left->Lock();
         if (UNLIKELY(left != leaf->left_ || left->deleted_)) {
-          left->ReleaseWriteLatch();
+          left->Unlock();
           continue;
         }
       }
-      leaf->GetWriteLatch();
+      leaf->Lock();
       if (LIKELY(right != nullptr)) {
-        right->GetWriteLatch();
+        right->Lock();
         if (UNLIKELY(right != leaf->right_ || right->deleted_)) {
           if (LIKELY(left != nullptr)) {
-            left->ReleaseWriteLatch();
+            left->Unlock();
           }
-          leaf->ReleaseWriteLatch();
-          right->ReleaseWriteLatch();
+          leaf->Unlock();
+          right->Unlock();
           continue;
         }
       }
@@ -967,13 +1090,13 @@ class BPlusTree {
 
     if (LIKELY(left != nullptr)) {
       left->right_ = new_leaf_left;
-      left->ReleaseWriteLatch();
+      left->Unlock();
     }
     leaf->MarkDeleted();
-    leaf->ReleaseWriteLatch();
+    leaf->Unlock();
     if (LIKELY(right != nullptr)) {
       right->left_ = new_leaf_right;
-      right->ReleaseWriteLatch();
+      right->Unlock();
     }
 
     // If split is on root (leaf)
@@ -1043,11 +1166,11 @@ class BPlusTree {
       new_child_right = static_cast<BaseNode *>(new_node_right);
 
       old_node->MarkDeleted();
-      old_node->ReleaseWriteLatch();
+      old_node->Unlock();
     }
 
     if (old_node->size_ < old_node->limit_) {
-//      TERRIER_ASSERT(old_node->write_latch, "must hold write latch if not full");
+//      TERRIER_ASSERT(old_node->write_latch_, "must hold write latch if not full");
       InnerNode* new_node = new InnerNode(this);
       new_node->size_ = old_node->size_.load();
       for (i = 0; i < old_node->size_; i++) {
@@ -1064,7 +1187,7 @@ class BPlusTree {
       new_node->InsertInner(new_key, new_child_right);
 
       old_node->MarkDeleted();
-      old_node->ReleaseWriteLatch();
+      old_node->Unlock();
 
       if (old_node == root_) {
         TERRIER_ASSERT(holds_tree_latch && locked_nodes.empty(),
@@ -1082,7 +1205,7 @@ class BPlusTree {
         locked_nodes.pop_back();
         num_popped++;
         old_node->children_[child_index] = new_node;
-        old_node->ReleaseWriteLatch();
+        old_node->Unlock();
         if (holds_tree_latch) {
           TERRIER_ASSERT(old_node == root_, "if we hold the tree latch, then we are adjusting the root");
           UnlatchRoot();
@@ -1107,6 +1230,12 @@ class BPlusTree {
     return true;
   }
 
+  /// Insert inserts given key value pair into tree if the predicate provided returns true on value associated with key
+  /// \param predicate must return false values associated with all equal keys for insert to succeed
+  /// \param key
+  /// \param val
+  /// \param predicate_satisfied return value indicating whether the predicate returned true on values associated with
+  /// \return bool indicating whether the insert succeeded
   bool Insert(std::function<bool(const ValueType)> predicate, KeyType key, ValueType val, bool *predicate_satisfied) {
     uint64_t epoch = StartFunction();
     bool result = InsertHelper(predicate, key, val, predicate_satisfied);
@@ -1114,6 +1243,11 @@ class BPlusTree {
     return result;
   }
 
+  /// ScanKeyHelper helper function for ScanKey. Returns vector of all values associated with the given key on which
+  /// the given predicate returns true
+  /// \param key
+  /// \param values return vector of values associated with key on which the predicate returns true
+  /// \param predicate
   void ScanKeyHelper(KeyType key, std::vector<ValueType> *values, std::function<bool(ValueType)> predicate) {
     bool done = false;
     for (auto* leaf = FindMinLeaf(key); leaf != nullptr && !done; leaf = leaf->right_) {
@@ -1130,12 +1264,21 @@ class BPlusTree {
 
   }
 
+  /// ScanKey Returns vector of all values associated with the given key on which
+  /// the given predicate returns true
+  /// \param key
+  /// \param values return vector of values associated with key on which the predicate returns true
+  /// \param predicate
   void ScanKey(KeyType key, std::vector<ValueType> *values, std::function<bool(ValueType)> predicate = [] (ValueType v) { return true; }) {
     uint64_t epoch = StartFunction();
     ScanKeyHelper(key, values, predicate);
     EndFunction(epoch);
   }
 
+  /// RemoveHelper Helper function for Remove. Removes key value pair given
+  /// \param key
+  /// \param value
+  /// \return bool representing wheter pair was successfull
   bool RemoveHelper(KeyType key, ValueType value) {
     bool done = false;
     while (true) {
@@ -1160,6 +1303,10 @@ class BPlusTree {
     return false;
   }
 
+  /// Remove Removes key value pair given
+  /// \param key
+  /// \param value
+  /// \return bool representing wheter pair was successfull
   bool Remove(KeyType key, ValueType value) {
     uint64_t epoch = StartFunction();
     bool result = RemoveHelper(key, value);
@@ -1167,6 +1314,11 @@ class BPlusTree {
     return result;
   }
 
+  /// MergeToDepth Recurses on all subchildren until the given node is at the max depth. Then merges and replaces all
+  /// chilren of the given node.
+  /// \param node
+  /// \param max_depth max depth to be reached before merging
+  /// \param current_depth current depth in the tree
   void MergeToDepth(InnerNode *node, uint64_t max_depth, uint64_t current_depth) {
     if (UNLIKELY(node->GetType() == NodeType::LEAF || node->deleted_)) {
       return;
@@ -1190,6 +1342,8 @@ class BPlusTree {
     }
   }
 
+  /// CompressTree compresses the given tree my merging all mergable nodes. Does so by iteative shallowing and merging
+  /// from the bottom up. As a result, the tree is able to be compressed without blocking inserts or reads.
   void CompressTree() {
     uint64_t depth = GetDepth();
     if (depth == 1) {
@@ -1214,6 +1368,8 @@ class BPlusTree {
     UnlatchRoot();
   }
 
+  /// GetDepth retuns the depth of the tree
+  /// \return
   uint64_t GetDepth() {
     uint64_t d = 1;
     BaseNode *n = root_;
@@ -1224,6 +1380,8 @@ class BPlusTree {
     return d;
   }
 
+  /// FindMinLeaf finds the minimum leaf in the tree
+  /// \return pointer to the right most leaf of the tree
   LeafNode* FindMinLeaf() {
     while (true) {
     OuterLoop:
@@ -1242,6 +1400,8 @@ class BPlusTree {
     }
   }
 
+  /// FindMinLeaf finds the minimum leaf in the tree that could contain the given key
+  /// \return pointer to the right most leaf of the tree that could contain the given key
   LeafNode* FindMinLeaf(KeyType key) {
     while (true) {
     OuterLoop:
@@ -1261,7 +1421,8 @@ class BPlusTree {
     }
   }
 
-
+  /// FindMaxLeaf finds the maximum leaf in the tree
+  /// \return pointer to the left most leaf of the tree
   LeafNode* FindMaxLeaf() {
     while (true) {
     OuterLoop:
@@ -1280,6 +1441,8 @@ class BPlusTree {
     }
   }
 
+  /// FindMaxLeaf finds the maximum leaf in the tree that could contain the given key
+  /// \return pointer to the left most leaf of the tree that could contain the given key
   LeafNode* FindMaxLeaf(KeyType key) {
     while (true) {
     OuterLoop:
@@ -1298,6 +1461,7 @@ class BPlusTree {
     }
   }
 
+  /// LatchRoot locks modificiation the root. Does not block reading
   void LatchRoot() {
 //    bool t = true;
 //    bool f = false;
@@ -1306,20 +1470,25 @@ class BPlusTree {
     root_latch_.Lock();
   }
 
+  /// UnlatchRoot unlocks modificiation the root
   void UnlatchRoot() {
 //    TERRIER_ASSERT(root_latch_, "root latch should be held");
 //    root_latch_ = false;
     root_latch_.Unlock();
   }
 
+  // Key comparator, and key and value equality checker
+  KeyComparator key_cmp_obj_;
+  KeyEqualityChecker key_eq_obj_;
+  ValueEqualityChecker value_eq_obj_;
   std::atomic<uint64_t> active_epochs_[MAX_NUM_ACTIVE_EPOCHS] = {};
 //  InnerNodeAllocator inner_node_allocator_ = InnerNodeAllocator(ALLOCATOR_START_SIZE, this);
 //  LeafNodeAllocator leaf_node_allocator_ = LeafNodeAllocator(ALLOCATOR_START_SIZE, this);
   std::atomic<uint64_t> epoch_ = 1;
-  common::SpinLatch root_latch_;
-//  std::atomic<bool> root_latch_ = false;
+  BPlusTreeLatch root_latch_;
   std::atomic<BaseNode *> root_;
   std::atomic<uint64_t> structure_size_;
+
 };
 
 }  // namespace terrier::storage::index
