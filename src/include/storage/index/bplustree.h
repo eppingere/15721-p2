@@ -246,9 +246,39 @@ class BPlusTree {
 
     InnerNode* Merge() {
       typename BaseNode::ScopedWriteLatch l(this);
+      TERRIER_ASSERT(!this->deleted_, "we should never merge a deleted node");
+
+      bool left_locked = false;
+      bool right_locked = false;
+      LeafNode* left, *right;
+      while (true) {
+        if (children_[0].load()->GetType() == NodeType::LEAF && static_cast<LeafNode*>(children_[0].load())->left_ != nullptr) {
+          left = static_cast<LeafNode*>(children_[0].load())->left_;
+          left->GetWriteLatch();
+          if (left->deleted_ || left != static_cast<LeafNode*>(children_[0].load())->left_) {
+            left->ReleaseWriteLatch();
+          }
+          left_locked = true;
+        }
+        break;
+      }
+
       for (uint16_t i = 0; i < this->size_; i++) {
         children_[i].load()->GetWriteLatch();
       }
+
+      while (true) {
+        if (children_[this->size_].load()->GetType() == NodeType::LEAF && static_cast<LeafNode*>(children_[this->size_].load())->right_ != nullptr) {
+          right = static_cast<LeafNode*>(children_[this->size_].load())->right_;
+          right->GetWriteLatch();
+          if (right->deleted_ || right != static_cast<LeafNode*>(children_[this->size_].load())->right_) {
+            right->ReleaseWriteLatch();
+          }
+          right_locked = true;
+        }
+        break;
+      }
+
 
       InnerNode *new_node;
       if (children_[0].load()->GetType() == NodeType::LEAF) {
@@ -257,9 +287,15 @@ class BPlusTree {
         new_node = MergeAboveInnerNodes();
       }
 
+      if (left_locked) {
+        left->ReleaseWriteLatch();
+      }
       for (uint16_t i = 0; i < this->size_; i++) {
         children_[i].load()->MarkDeleted();
         children_[i].load()->ReleaseWriteLatch();
+      }
+      if (right_locked) {
+        right->ReleaseWriteLatch();
       }
 
       this->MarkDeleted();
@@ -269,16 +305,16 @@ class BPlusTree {
     InnerNode *MergeAboveInnerNodes() {
       std::vector<std::pair<KeyType, BaseNode*>> kvps;
 
-      InnerNode *child = static_cast<InnerNode *>(children_[0]);
+      InnerNode *child = static_cast<InnerNode *>(children_[0].load());
       for (uint16_t j = 0; j < child->size_; j++) {
-        kvps.emplace_back(std::pair<KeyType, BaseNode*>(child->keys_[j], child->children_[j + 1]));
+        kvps.emplace_back(std::pair<KeyType, BaseNode*>(child->keys_[j], child->children_[j + 1].load()));
       }
 
       for (uint16_t i = 1; i <= this->size_; i++) {
-        child = static_cast<InnerNode *>(children_[i]);
-        kvps.emplace_back(std::pair<KeyType, BaseNode*>(keys_[i - 1], child->children_[0]));
+        child = static_cast<InnerNode *>(children_[i].load());
+        kvps.emplace_back(std::pair<KeyType, BaseNode*>(keys_[i - 1], child->children_[0].load()));
         for (uint16_t j = 0; j < child->size_; j++) {
-          kvps.emplace_back(std::pair<KeyType, BaseNode*>(child->keys_[j], child->children_[j + 1]));
+          kvps.emplace_back(std::pair<KeyType, BaseNode*>(child->keys_[j], child->children_[j + 1].load()));
         }
       }
 
@@ -295,11 +331,11 @@ class BPlusTree {
                      "we should have at least enough slots to cover all our tuples");
 
       InnerNode *new_node = new InnerNode(this->tree_);
-      InnerNode *last_child = static_cast<InnerNode *>(children_[0].load())->children_[0];
+      InnerNode *last_child = static_cast<InnerNode *>(static_cast<InnerNode *>(children_[0].load())->children_[0].load());
 
       uint64_t new_node_index = 0;
       uint64_t kvps_index = 0;
-      while (kvps_index < kvps.size()) {
+      do {
         InnerNode *new_child = new InnerNode(this->tree_);
         new_child->children_[0] = last_child;
 
@@ -311,22 +347,24 @@ class BPlusTree {
 
         new_child->size_ = i;
         if (kvps_index + i < kvps.size()) {
-          new_node->keys_[new_node_index] = kvps[kvps_index + i];
-          last_child = kvps[kvps_index + i];
+          new_node->keys_[new_node_index] = kvps[kvps_index + i].first;
+          last_child = static_cast<InnerNode *>(kvps[kvps_index + i].second);
         }
+
+        new_node->children_[new_node_index] = new_child;
 
         kvps_index += i;
         new_node_index++;
-      }
+      } while (kvps_index < kvps.size());
 
-      new_node->size_ = new_node_index;
+      new_node->size_ = new_node_index - 1;
       return new_node;
     }
 
     InnerNode *MergeAboveLeaves() {
       std::vector<std::pair<KeyType, ValueType>> kvps;
       for (uint16_t i = 0; i < this->size_; i++) {
-        auto *leaf = static_cast<LeafNode *>(children_[i]);
+        auto *leaf = static_cast<LeafNode *>(children_[i].load());
         for (uint16_t j = 0; j < leaf->size_; j++) {
           if (leaf->IsReadable(j)) {
             kvps.emplace_back(std::pair<KeyType, ValueType>(leaf->keys_[j], leaf->values_[j]));
@@ -334,20 +372,20 @@ class BPlusTree {
         }
       }
 
-      sort(kvps.begin(), kvps.end(), [&] (std::pair<KeyType, ValueType> a, std::pair<KeyType, ValueType> b) {
+      sort(kvps.begin(), kvps.end(), [&](std::pair<KeyType, ValueType> a, std::pair<KeyType, ValueType> b) {
         return this->tree_->KeyCmpLess(a.first, b.first);
       });
 
       // we put into each new leaf the min of (1) ceiling(total pairs / branch factor), (2) LEAF_SIZE / 2
       uint16_t optimal_leaf_size = (kvps.size() + static_cast<uint64_t>(BRANCH_FACTOR) - 1) /
-                                   static_cast<uint64_t>(BRANCH_FACTOR);
+          static_cast<uint64_t>(BRANCH_FACTOR);
       if (optimal_leaf_size < LEAF_OPTIMAL_FILL) {
         optimal_leaf_size = LEAF_OPTIMAL_FILL;
       }
       TERRIER_ASSERT(optimal_leaf_size <= LEAF_SIZE,
-          "we should never have more than LEAF_SIZE many pairs in a leaf");
+                     "we should never have more than LEAF_SIZE many pairs in a leaf");
       TERRIER_ASSERT(optimal_leaf_size * BRANCH_FACTOR >= kvps.size(),
-          "we should have at least enough slots to cover all our tuples");
+                     "we should have at least enough slots to cover all our tuples");
 
       InnerNode *new_node = new InnerNode(this->tree_);
       LeafNode *new_leaf = new LeafNode(this->tree_);
@@ -356,10 +394,14 @@ class BPlusTree {
         new_leaf->keys_[i] = kvps[i].first;
         new_leaf->values_[i] = kvps[i].second;
       }
+      new_leaf->left_ = static_cast<LeafNode *>(children_[0].load())->left_.load();
+      if (new_leaf->left_ != nullptr) {
+        new_leaf->left_.load()->right_ = new_leaf;
+      }
       new_leaf->size_ = i;
-      new_node->children_[0] = new_node;
+      new_node->children_[0] = new_leaf;
 
-      uint64_t allocated_index = 0;
+      uint64_t allocated_index = i;
       uint64_t inner_node_index = 0;
       while (allocated_index < kvps.size()) {
         TERRIER_ASSERT(inner_node_index < BRANCH_FACTOR, "must have at most branch factor many children");
@@ -374,19 +416,19 @@ class BPlusTree {
         new_node->children_[inner_node_index + 1] = new_node;
         new_node->keys_[inner_node_index] = new_leaf->keys_[0];
 
-        new_leaf->left_ = new_node->children_[inner_node_index];
-        new_node->children_[inner_node_index]->right_ = new_leaf;
-        new_leaf->left_ = new_node->children_[inner_node_index];
+        new_leaf->left_ = static_cast<LeafNode *>(new_node->children_[inner_node_index].load());
+        static_cast<LeafNode *>(new_node->children_[inner_node_index].load())->right_ = new_leaf;
 
         allocated_index += static_cast<uint64_t>(i);
         inner_node_index++;
       }
+      TERRIER_ASSERT(allocated_index == kvps.size(), "index should be equal to size");
       new_node->size_ = inner_node_index;
 
-      LeafNode* right = static_cast<LeafNode *>(children_[this->size_])->right;
-      new_node->children_[inner_node_index]->right = right;
-      if (LIKELY(right != nullptr)) {
-        right->left_ = new_node->children_[inner_node_index];
+
+      new_leaf->right_ = static_cast<LeafNode *>(children_[this->size_].load())->right_.load();
+      if (new_leaf->right_ != nullptr) {
+        new_leaf->right_.load()->left_ = new_leaf;
       }
 
       return new_node;
@@ -860,7 +902,7 @@ class BPlusTree {
       right = leaf->right_.load();
       if (LIKELY(left != nullptr)) {
         left->GetWriteLatch();
-        if (UNLIKELY(left != leaf->left_)) {
+        if (UNLIKELY(left != leaf->left_ || left->deleted_)) {
           left->ReleaseWriteLatch();
           continue;
         }
@@ -868,7 +910,7 @@ class BPlusTree {
       leaf->GetWriteLatch();
       if (LIKELY(right != nullptr)) {
         right->GetWriteLatch();
-        if (UNLIKELY(right != leaf->right_)) {
+        if (UNLIKELY(right != leaf->right_ || right->deleted_)) {
           if (LIKELY(left != nullptr)) {
             left->ReleaseWriteLatch();
           }
@@ -1136,15 +1178,15 @@ class BPlusTree {
         return;
       }
       for (uint64_t i = 0; i <= node->size_; i++) {
-        if (UNLIKELY(node->children_[i].load()->GetType() == NodeType::LEAF)) continue;
-        InnerNode* child = static_cast<InnerNode *>(node->children_[i]);
+        if (UNLIKELY(node->children_[i].load()->deleted_ || node->children_[i].load()->GetType() == NodeType::LEAF)) continue;
+        InnerNode* child = static_cast<InnerNode *>(node->children_[i].load());
         node->children_[i] = child->Merge();
       }
       return;
     }
 
     for (uint16_t i = 0; i <= node->size_; i++) {
-      MergeToDepth(node->children_[i], max_depth, current_depth + 1);
+      MergeToDepth(static_cast<InnerNode *>(node->children_[i].load()), max_depth, current_depth + 1);
     }
   }
 
@@ -1161,12 +1203,12 @@ class BPlusTree {
       UnlatchRoot();
       return;
     }
-    for (uint64_t d = depth - 2; d > 1; d--) {
-      MergeToDepth(root_.load(), d, 1);
+    for (uint64_t d = depth - 2; d >= 1; d--) {
+      MergeToDepth(static_cast<InnerNode *>(root_.load()), d, 1);
     }
     LatchRoot();
     if (LIKELY(root_.load()->GetType() == NodeType::INNER_NODE)) {
-      MergeToDepth(root_.load(), 1, 1);
+      MergeToDepth(static_cast<InnerNode *>(root_.load()), 1, 1);
       root_ = static_cast<InnerNode *>(root_.load())->Merge();
     }
     UnlatchRoot();
