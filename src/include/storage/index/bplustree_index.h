@@ -37,6 +37,7 @@ class BPlusTreeIndex final : public Index {
 
   void PerformGarbageCollection() final {
     // FIXME(15-721 project2): invoke garbage collection on the underlying data structure
+    bplustree_->RunGarbageCollection();
   }
 
   size_t GetHeapUsage() const final {
@@ -140,9 +141,7 @@ class BPlusTreeIndex final : public Index {
     // Perform lookup in BPlusTree
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
 
-    std::function<bool(TupleSlot)> predicate = [&] (TupleSlot tuple) {
-      return IsVisible(txn, tuple);
-    };
+    std::function<bool(TupleSlot)> predicate = [&](TupleSlot tuple) { return IsVisible(txn, tuple); };
 
     bplustree_->ScanKey(index_key, value_list, predicate);
 
@@ -166,29 +165,25 @@ class BPlusTreeIndex final : public Index {
     if (low_key_exists) index_low_key.SetFromProjectedRow(*low_key, metadata_, num_attrs);
     if (high_key_exists) index_high_key.SetFromProjectedRow(*high_key, metadata_, num_attrs);
 
-
     uint64_t epoch = bplustree_->StartFunction();
 
-    std::function<bool(std::pair<KeyType, TupleSlot>)> predicate = [&] (std::pair<KeyType, TupleSlot> p) {
+    std::function<bool(std::pair<KeyType, TupleSlot>)> predicate = [&](std::pair<KeyType, TupleSlot> p) {
       return IsVisible(txn, p.second) &&
-            (!high_key_exists || p.first.PartialLessThan(index_high_key, &metadata_, num_attrs)) &&
-            (!low_key_exists || index_low_key.PartialLessThan(p.first, &metadata_, num_attrs));
+             (!high_key_exists || p.first.PartialLessThan(index_high_key, &metadata_, num_attrs)) &&
+             (!low_key_exists || index_low_key.PartialLessThan(p.first, &metadata_, num_attrs));
     };
 
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
-    for (auto* leaf = low_key_exists ? bplustree_->FindMinLeaf(index_high_key) : bplustree_->FindMinLeaf();
-          leaf != nullptr && (limit == 0 || value_list->size() < limit);
-          leaf = leaf->right_) {
+    for (auto *leaf = low_key_exists ? bplustree_->FindMinLeaf(index_high_key) : bplustree_->FindMinLeaf();
+         leaf != nullptr && (limit == 0 || value_list->size() < limit); leaf = leaf->right_) {
       if (!leaf->ScanRange(index_low_key, &index_high_key, value_list, predicate)) {
         break;
       }
     }
 
-
     while (limit != 0 && value_list->size() > limit) value_list->pop_back();
 
     bplustree_->EndFunction(epoch);
-
   }
 
   void ScanDescending(const transaction::TransactionContext &txn, const ProjectedRow &low_key,
@@ -205,12 +200,10 @@ class BPlusTreeIndex final : public Index {
 
     uint64_t epoch = bplustree_->StartFunction();
 
-    std::function<bool(TupleSlot)> predicate = [&] (TupleSlot tuple) {
-      return IsVisible(txn, tuple);
-    };
+    std::function<bool(TupleSlot)> predicate = [&](TupleSlot tuple) { return IsVisible(txn, tuple); };
 
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
-    for (auto* leaf = bplustree_->FindMaxLeaf(index_high_key); leaf != nullptr; leaf = leaf->left_) {
+    for (auto *leaf = bplustree_->FindMaxLeaf(index_high_key); leaf != nullptr; leaf = leaf->left_) {
       if (!leaf->ScanRangeReverse(index_low_key, &index_high_key, value_list, predicate)) {
         break;
       }
@@ -232,15 +225,14 @@ class BPlusTreeIndex final : public Index {
 
     uint64_t epoch = bplustree_->StartFunction();
 
-    std::function<bool(TupleSlot)> predicate = [&] (TupleSlot tuple) {
-      return IsVisible(txn, tuple);
-    };
+    std::function<bool(TupleSlot)> predicate = [&](TupleSlot tuple) { return IsVisible(txn, tuple); };
 
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
-    for (auto* leaf = bplustree_->FindMaxLeaf(index_high_key); leaf != nullptr && value_list->size() < limit; leaf = leaf->left_) {
-        if (!leaf->ScanRangeReverse(index_low_key, &index_high_key, value_list, predicate)) {
-          break;
-        }
+    for (auto *leaf = bplustree_->FindMaxLeaf(index_high_key); leaf != nullptr && value_list->size() < limit;
+         leaf = leaf->left_) {
+      if (!leaf->ScanRangeReverse(index_low_key, &index_high_key, value_list, predicate)) {
+        break;
+      }
     }
 
     while (value_list->size() > limit) {
@@ -261,6 +253,5 @@ extern template class BPlusTreeIndex<GenericKey<128>>;
 extern template class BPlusTreeIndex<GenericKey<256>>;
 
 extern template class BPlusTreeIndex<uint64_t>;
-
 
 }  // namespace terrier::storage::index

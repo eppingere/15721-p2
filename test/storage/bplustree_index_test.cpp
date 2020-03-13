@@ -1649,7 +1649,6 @@ TEST_F(BPlusTreeIndexTests, AbortDelete2) {
   txn_manager_->Commit(txn2, transaction::TransactionUtil::EmptyCallback, nullptr);
 }
 
-
 /**
  * Tests basic scan behavior using various windows to scan over (some out of of bounds of keyspace, some matching
  * exactly, etc.)
