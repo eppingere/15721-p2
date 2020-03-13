@@ -260,4 +260,7 @@ extern template class BPlusTreeIndex<GenericKey<64>>;
 extern template class BPlusTreeIndex<GenericKey<128>>;
 extern template class BPlusTreeIndex<GenericKey<256>>;
 
+extern template class BPlusTreeIndex<uint64_t>;
+
+
 }  // namespace terrier::storage::index
