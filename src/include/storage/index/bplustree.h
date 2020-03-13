@@ -274,7 +274,7 @@ class BPlusTree {
 
       bool left_locked = false;
       bool right_locked = false;
-      LeafNode* left, *right;
+      LeafNode* left = nullptr, *right = nullptr;
       while (true) {
         if (children_[0].load()->GetType() == NodeType::LEAF && static_cast<LeafNode*>(children_[0].load())->left_ != nullptr) {
           left = static_cast<LeafNode*>(children_[0].load())->left_;
@@ -391,7 +391,7 @@ class BPlusTree {
     /// \return pointer to merged node
     InnerNode *MergeAboveLeaves() {
       std::vector<std::pair<KeyType, ValueType>> kvps;
-      for (uint16_t i = 0; i < this->size_; i++) {
+      for (uint16_t i = 0; i <= this->size_; i++) {
         auto *leaf = static_cast<LeafNode *>(children_[i].load());
         for (uint16_t j = 0; j < leaf->size_; j++) {
           if (leaf->IsReadable(j)) {
@@ -441,7 +441,7 @@ class BPlusTree {
           new_leaf->values_[i] = kvps[i + allocated_index].second;
         }
         new_leaf->size_ = i;
-        new_node->children_[inner_node_index + 1] = new_node;
+        new_node->children_[inner_node_index + 1] = new_leaf;
         new_node->keys_[inner_node_index] = new_leaf->keys_[0];
 
         new_leaf->left_ = static_cast<LeafNode *>(new_node->children_[inner_node_index].load());
@@ -624,16 +624,17 @@ class BPlusTree {
     /// \param i index of pair
     /// \return bool representing wheter pair is readable or tombstoned
     bool IsReadable(uint16_t  i) {
-      return !static_cast<bool>((tomb_stones_[i / BITS_IN_UINT64] >> (i % BITS_IN_UINT64)) & static_cast<uint64_t>(0x1));
+      return !static_cast<bool>((tomb_stones_[static_cast<uint64_t>(i) / BITS_IN_UINT64] >> (static_cast<uint64_t>(i) % BITS_IN_UINT64)) & static_cast<uint64_t>(0x1));
     }
 
     /// MarkTombStone marks the pair at the given index as deleted
     /// \param i index of pair
     void MarkTombStone(uint16_t i) {
+
       while (true) {
-        uint64_t old_value = tomb_stones_[i / BITS_IN_UINT64];
-        uint16_t new_value = old_value | (static_cast<uint64_t>(0x1) << (i % BITS_IN_UINT64));
-        if (!tomb_stones_[i / BITS_IN_UINT64].compare_exchange_strong(old_value, new_value)) continue;
+        uint64_t old_value = tomb_stones_[static_cast<uint64_t>(i) / BITS_IN_UINT64];
+        uint16_t new_value = old_value | (static_cast<uint64_t>(0x1) << (static_cast<uint64_t>(i) % BITS_IN_UINT64));
+        if (!tomb_stones_[static_cast<uint64_t>(i) / BITS_IN_UINT64].compare_exchange_strong(old_value, new_value)) continue;
         return;
       }
     }
@@ -642,9 +643,9 @@ class BPlusTree {
     /// \param i index of pair
     void UnmarkTombStone(uint16_t i) {
       while (true) {
-        uint64_t old_value = tomb_stones_[i / BITS_IN_UINT64];
-        uint16_t new_value = old_value & (~(static_cast<uint64_t>(0x1) << (i % BITS_IN_UINT64)));
-        if (!tomb_stones_[i / BITS_IN_UINT64].compare_exchange_strong(old_value, new_value)) continue;
+        uint64_t old_value = tomb_stones_[static_cast<uint64_t>(i) / BITS_IN_UINT64];
+        uint16_t new_value = old_value & (~(static_cast<uint64_t>(0x1) << (static_cast<uint64_t>(i) % BITS_IN_UINT64)));
+        if (!tomb_stones_[static_cast<uint64_t>(i) / BITS_IN_UINT64].compare_exchange_strong(old_value, new_value)) continue;
         return;
       }
     }
@@ -1278,7 +1279,7 @@ class BPlusTree {
   /// RemoveHelper Helper function for Remove. Removes key value pair given
   /// \param key
   /// \param value
-  /// \return bool representing wheter pair was successfull
+  /// \return bool representing whether pair was successful
   bool RemoveHelper(KeyType key, ValueType value) {
     bool done = false;
     while (true) {
