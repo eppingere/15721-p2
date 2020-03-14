@@ -37,7 +37,7 @@ class BPlusTreeIndex final : public Index {
 
   void PerformGarbageCollection() final {
     // FIXME(15-721 project2): invoke garbage collection on the underlying data structure
-    bplustree_->RunGarbageCollection();
+//    bplustree_->RunGarbageCollection();
   }
 
   size_t GetHeapUsage() const final {
