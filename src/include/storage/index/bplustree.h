@@ -361,13 +361,13 @@ class BPlusTree {
       TERRIER_ASSERT(optimal_inner_node_size * BRANCH_FACTOR >= kvps.size() + 1,
                      "we should have at least enough slots to cover all our tuples");
 
-      auto *new_node = inner_node_allocator_.NewNode();
+      InnerNode *new_node = this->tree_->inner_node_allocator_.NewNode();
       auto *last_child = static_cast<InnerNode *>(static_cast<InnerNode *>(children_[0].load())->children_[0].load());
 
       uint64_t new_node_index = 0;
       uint64_t kvps_index = 0;
       do {
-        auto *new_child = inner_node_allocator_.NewNode();
+        InnerNode *new_child = this->tree_->inner_node_allocator_.NewNode();
         new_child->children_[0] = last_child;
 
         uint64_t i;
@@ -419,8 +419,8 @@ class BPlusTree {
       TERRIER_ASSERT(optimal_leaf_size * BRANCH_FACTOR >= kvps.size(),
                      "we should have at least enough slots to cover all our tuples");
 
-      auto *new_node = inner_node_allocator_.NewNode();
-      auto *new_leaf = leaf_node_allocator_.NewNode();
+      InnerNode *new_node = this->tree_->inner_node_allocator_.NewNode();
+      LeafNode *new_leaf = this->tree_->leaf_node_allocator_.NewNode();
       uint16_t i;
       for (i = 0; i < optimal_leaf_size && i < kvps.size(); i++) {
         new_leaf->keys_[i] = kvps[i].first;
@@ -437,7 +437,7 @@ class BPlusTree {
       uint64_t inner_node_index = 0;
       while (allocated_index < kvps.size()) {
         TERRIER_ASSERT(inner_node_index < BRANCH_FACTOR, "must have at most branch factor many children");
-        new_leaf = leaf_node_allocator_.NewNode();
+        new_leaf = this->tree_->leaf_node_allocator_.NewNode();
         for (i = 0; i < optimal_leaf_size && allocated_index + static_cast<uint64_t>(i) < kvps.size(); i++) {
           new_leaf->keys_[i] = kvps[i + allocated_index].first;
           new_leaf->values_[i] = kvps[i + allocated_index].second;
@@ -484,7 +484,7 @@ class BPlusTree {
       this->tree_ = tree;
       this->deleted_ = false;
       this->size_ = 0;
-      memset(&tomb_stones_, 0, (LEAF_SIZE + BITS_IN_UINT64 - 1) / BITS_IN_UINT64);
+      memset(&tomb_stones_, 0, sizeof(uint64_t) * (LEAF_SIZE + BITS_IN_UINT64 - 1) / BITS_IN_UINT64);
       right_ = nullptr;
       left_ = nullptr;
       this->type_ = NodeType::LEAF;
@@ -496,9 +496,10 @@ class BPlusTree {
     /// \return bool representing whether the predicate returned true on any key in this node or any node to the right
     /// of this node
     bool ScanPredicate(KeyType key, std::function<bool(const ValueType)> predicate) {
-      LeafNode *current_leaf = this;
       bool no_bigger_keys = true;
-      while (current_leaf != nullptr && no_bigger_keys) {
+      for (LeafNode *current_leaf = this;
+          current_leaf != nullptr && no_bigger_keys;
+          current_leaf = current_leaf->right_) {
         for (uint16_t i = 0; i < current_leaf->size_; i++) {
           if (current_leaf->IsReadable(i)) {
             if (current_leaf->tree_->KeyCmpEqual(key, current_leaf->keys_[i]) && predicate(current_leaf->values_[i])) {
@@ -509,7 +510,6 @@ class BPlusTree {
             }
           }
         }
-        current_leaf = current_leaf->right_;
       }
       return false;
     }
@@ -528,22 +528,7 @@ class BPlusTree {
         return OptimisticResult::RetryableFailure;
       }
 
-      *predicate_satisfied = false;
-      bool saw_bigger = false;
-      for (uint16_t i = 0; i < this->size_; i++) {
-        if (IsReadable(i)) {
-          if (this->tree_->KeyCmpEqual(key, keys_[i]) && predicate(values_[i])) {
-            *predicate_satisfied = true;
-            return OptimisticResult::Failure;
-          }
-          if (this->tree_->KeyCmpGreater(keys_[i], key)) {
-            saw_bigger = true;
-          }
-        }
-      }
-
-      LeafNode *right = right_;
-      if (!saw_bigger && right != nullptr && (*predicate_satisfied = right->ScanPredicate(key, predicate))) {
+      if ((*predicate_satisfied = ScanPredicate(key, predicate))){
         return OptimisticResult::Failure;
       }
 
@@ -784,13 +769,13 @@ class BPlusTree {
          iter++) {
     }
 
-    uint64_t safe_iter = iter - 1;
-    uint64_t safe_to_delete_epoch = old_epoch + safe_iter - MAX_NUM_ACTIVE_EPOCHS;
+//    uint64_t safe_iter = iter - 1;
+//    uint64_t safe_to_delete_epoch = old_epoch + safe_iter - MAX_NUM_ACTIVE_EPOCHS;
 
     epoch_++;
 
-    inner_node_allocator_.ReclaimOldNodes(safe_to_delete_epoch);
-    leaf_node_allocator_.ReclaimOldNodes(safe_to_delete_epoch);
+//    inner_node_allocator_.ReclaimOldNodes(safe_to_delete_epoch);
+//    leaf_node_allocator_.ReclaimOldNodes(safe_to_delete_epoch);
   }
 
   void RunGarbageCollection() {
