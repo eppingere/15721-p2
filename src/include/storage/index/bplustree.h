@@ -81,7 +81,7 @@ class BPlusTree {
   // Tunable parameters
   static const uint16_t BRANCH_FACTOR = 20;
   static const uint16_t INNER_NODE_OPTIMAL_FILL = BRANCH_FACTOR / 2;
-  static const uint16_t LEAF_SIZE = 20;  // cannot ever be less than 3
+  static const uint16_t LEAF_SIZE = 128;  // cannot ever be less than 3
   static const uint16_t LEAF_OPTIMAL_FILL = LEAF_SIZE / 2;
   static const uint64_t MAX_NUM_ACTIVE_EPOCHS = static_cast<uint64_t>(0x1) << 3;
   static const uint64_t ALLOCATOR_ARRAY_SIZE = 64;
@@ -159,7 +159,7 @@ class BPlusTree {
    * are shared among them. All nodes do not require latches when being read. Only require latches when being written
    * to.
    */
-  class alignas(common::Constants::CACHELINE_SIZE) BaseNode {
+  class BaseNode {
    public:
     BaseNode() = default;
 
@@ -776,7 +776,7 @@ class BPlusTree {
 
   void RunGarbageCollection() {
     gc_latch_.Lock();
-    CompressTree();
+//    CompressTree();
     ReclaimOldNodes();
     gc_latch_.Unlock();
   }
