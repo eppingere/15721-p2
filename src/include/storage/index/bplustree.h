@@ -73,7 +73,7 @@ class BPlusTree {
                      KeyEqualityChecker p_key_eq_obj = KeyEqualityChecker{}, KeyHashFunc p_key_hash_obj = KeyHashFunc{},
                      ValueEqualityChecker p_value_eq_obj = ValueEqualityChecker{})
       : key_cmp_obj_{p_key_cmp_obj}, key_eq_obj_{p_key_eq_obj}, value_eq_obj_{p_value_eq_obj}, epoch_(1) {
-    root_ = static_cast<BaseNode *>(leaf_node_allocator_.NewNode());
+    root_ = static_cast<BaseNode *>(new LeafNode(this));
   }
 
   ~BPlusTree() = default;
@@ -169,7 +169,7 @@ class BPlusTree {
     BPlusTree *tree_;
     std::atomic<uint64_t> deleted_epoch_;
     std::atomic<uint16_t> size_;
-    BPlusTreeLatch write_latch_;
+    common::SpinLatch write_latch_;
     std::atomic<bool> deleted_ = false;
     NodeType type_;
 
@@ -765,13 +765,13 @@ class BPlusTree {
          iter++) {
     }
 
-    uint64_t safe_iter = iter - 1;
-    uint64_t safe_to_delete_epoch = old_epoch + safe_iter - MAX_NUM_ACTIVE_EPOCHS;
+//    uint64_t safe_iter = iter - 1;
+//    uint64_t safe_to_delete_epoch = old_epoch + safe_iter - MAX_NUM_ACTIVE_EPOCHS;
 
     epoch_++;
 
-    inner_node_allocator_.ReclaimOldNodes(safe_to_delete_epoch);
-    leaf_node_allocator_.ReclaimOldNodes(safe_to_delete_epoch);
+//    inner_node_allocator_.ReclaimOldNodes(safe_to_delete_epoch);
+//    leaf_node_allocator_.ReclaimOldNodes(safe_to_delete_epoch);
   }
 
   void RunGarbageCollection() {
@@ -907,8 +907,8 @@ class BPlusTree {
                    "none of leaf right and left should be marked as deleted");
 
     // Otherwise must split so create new leaf
-    LeafNode *new_leaf_right = leaf_node_allocator_.NewNode();
-    LeafNode *new_leaf_left = leaf_node_allocator_.NewNode();
+    LeafNode *new_leaf_right = new LeafNode(this);
+    LeafNode *new_leaf_left = new LeafNode(this);
 
     std::vector<std::pair<KeyType, ValueType>> kvps;
     kvps.emplace_back(std::pair<KeyType, ValueType>(key, val));
@@ -962,7 +962,7 @@ class BPlusTree {
       TERRIER_ASSERT(leaf == root_, "we had to split a leaf without having to modify the parent");
       TERRIER_ASSERT(holds_tree_latch, "we are trying to split the root without a latch on the tree");
       // Create new root and update attributes for new root and tree
-      auto new_root = inner_node_allocator_.NewNode();
+      auto new_root = new InnerNode(this);
       new_root->keys_[0] = new_key;
       new_root->children_[0] = new_leaf_left;
       new_root->children_[1] = new_leaf_right;
@@ -988,8 +988,8 @@ class BPlusTree {
         break;
       }
 
-      new_node_left = inner_node_allocator_.NewNode();
-      new_node_right = inner_node_allocator_.NewNode();
+      new_node_left = new InnerNode(this);
+      new_node_right = new InnerNode(this);
       for (i = 0; i < old_node->size_; i++) {
         new_node_left->keys_[i] = old_node->keys_[i];
         new_node_left->children_[i] = old_node->children_[i].load();
@@ -1028,7 +1028,7 @@ class BPlusTree {
 
     if (old_node->size_ < old_node->GetLimit()) {
       //      TERRIER_ASSERT(old_node->write_latch_, "must hold write latch if not full");
-      InnerNode *new_node = inner_node_allocator_.NewNode();
+      InnerNode *new_node = new InnerNode(this);
       new_node->size_ = old_node->size_.load();
       for (i = 0; i < old_node->size_; i++) {
         new_node->keys_[i] = old_node->keys_[i];
@@ -1071,7 +1071,7 @@ class BPlusTree {
     } else {
       TERRIER_ASSERT(locked_nodes.empty() && old_node == root_ && holds_tree_latch,
                      "we should have split all the way to the top");
-      auto new_root = inner_node_allocator_.NewNode();
+      auto new_root = new InnerNode(this);
       new_root->keys_[0] = new_key;
       new_root->children_[0] = new_child_left;
       new_root->children_[1] = new_child_right;
@@ -1218,13 +1218,15 @@ class BPlusTree {
     }
     for (uint64_t d = depth - 2; d >= 1; d--) {
       MergeToDepth(static_cast<InnerNode *>(root_.load()), d, 1);
+      std::this_thread::sleep_for (std::chrono::seconds (1));
     }
-    LatchRoot();
+
     if (LIKELY(root_.load()->GetType() == NodeType::INNER_NODE)) {
-      MergeToDepth(static_cast<InnerNode *>(root_.load()), 1, 1);
+      LatchRoot();
       root_ = static_cast<InnerNode *>(root_.load())->Merge();
+      UnlatchRoot();
     }
-    UnlatchRoot();
+
   }
 
   /// GetDepth retuns the depth of the tree
@@ -1341,12 +1343,12 @@ class BPlusTree {
   KeyEqualityChecker key_eq_obj_;
   ValueEqualityChecker value_eq_obj_;
   std::atomic<uint64_t> active_epochs_[MAX_NUM_ACTIVE_EPOCHS] = {};
-  std::atomic<uint64_t> structure_size_ = 0;
+  std::atomic<uint64_t> structure_size_ = 5;
   std::atomic<uint64_t> epoch_ = 1;
   std::atomic<BaseNode *> root_;
-  NodeAllocator<InnerNode> inner_node_allocator_ = NodeAllocator<InnerNode>(this);
-  NodeAllocator<LeafNode> leaf_node_allocator_ = NodeAllocator<LeafNode>(this);
-  BPlusTreeLatch root_latch_, gc_latch_;
+//  NodeAllocator<InnerNode> inner_node_allocator_ = NodeAllocator<InnerNode>(this);
+//  NodeAllocator<LeafNode> leaf_node_allocator_ = NodeAllocator<LeafNode>(this);
+  common::SpinLatch root_latch_, gc_latch_;
 };
 
 }  // namespace terrier::storage::index
