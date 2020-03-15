@@ -17,7 +17,7 @@ TEST_F(BPlusTreeTests, CompressTest1) {
   test_tree_ = new BPlusTree<uint64_t, uint64_t>();
   for (uint64_t i = 0; i < num_inserts_; i++) {
     bool rand = false;
-    EXPECT_TRUE(test_tree_->Insert([](uint64_t) { return false; }, i, i, &rand));
+    EXPECT_TRUE(test_tree_->Insert(i, i, &rand));
   }
 
   uint64_t start_depth = test_tree_->GetDepth();
@@ -58,7 +58,7 @@ TEST_F(BPlusTreeTests, CompressTest2) {
   test_tree_ = new BPlusTree<uint64_t, uint64_t>();
   for (uint64_t i = 0; i < num_inserts_; i++) {
     bool rand = false;
-    EXPECT_TRUE(test_tree_->Insert([](uint64_t) { return false; }, i, i, &rand));
+    EXPECT_TRUE(test_tree_->Insert(i, i, &rand));
   }
 
   uint64_t start_depth = test_tree_->GetDepth();
@@ -97,7 +97,7 @@ TEST_F(BPlusTreeTests, CompressTest3) {
   test_tree_ = new BPlusTree<uint64_t, uint64_t>();
   for (uint64_t i = 0; i < BPlusTree<uint64_t, uint64_t>::LEAF_SIZE + 1; i++) {
     bool rand = false;
-    EXPECT_TRUE(test_tree_->Insert([](uint64_t) { return false; }, i, i, &rand));
+    EXPECT_TRUE(test_tree_->Insert(i, i, &rand));
   }
 
   uint64_t start_depth = test_tree_->GetDepth();
@@ -136,7 +136,7 @@ TEST_F(BPlusTreeTests, CompressTest4) {
   test_tree_ = new BPlusTree<uint64_t, uint64_t>();
   for (uint64_t i = 0; i < BPlusTree<uint64_t, uint64_t>::LEAF_SIZE / 2; i++) {
     bool rand = false;
-    EXPECT_TRUE(test_tree_->Insert([](uint64_t) { return false; }, i, i, &rand));
+    EXPECT_TRUE(test_tree_->Insert(i, i, &rand));
   }
 
   uint64_t start_depth = test_tree_->GetDepth();

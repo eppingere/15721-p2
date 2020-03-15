@@ -174,14 +174,21 @@ class BPlusTreeIndex final : public Index {
     };
 
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
-    for (auto *leaf = low_key_exists ? bplustree_->FindMinLeafReadOnly(index_high_key) : bplustree_->FindMinLeafReadOnly();
-         leaf != nullptr && (limit == 0 || value_list->size() < limit); leaf = leaf->right_) {
-      if (!leaf->ScanRange(index_low_key, &index_high_key, value_list, predicate)) {
-        break;
+    bool done = false;
+    for (auto *leaf = low_key_exists ? bplustree_->FindMinLeafReadOnly(index_high_key)
+                                     : bplustree_->FindMinLeafReadOnly();
+         leaf != nullptr && (limit == 0 || value_list->size() < limit) && !done; leaf = leaf->right_) {
+
+      for (uint16_t i = 0; i < leaf->size_ && (limit == 0 || value_list->size() < limit); i++) {
+        if (leaf->IsReadable(i)) {
+          if (predicate({leaf->keys_[i], leaf->values_[i]})) {
+            value_list->emplace_back(leaf->values_[i]);
+          } else if (high_key_exists && !leaf->keys_[i].PartialLessThan(index_high_key, &metadata_, num_attrs)) {
+            done = true;
+          }
+        }
       }
     }
-
-    while (limit != 0 && value_list->size() > limit) value_list->pop_back();
 
     bplustree_->EndFunction(epoch);
   }
