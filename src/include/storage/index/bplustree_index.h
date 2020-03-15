@@ -57,7 +57,7 @@ class BPlusTreeIndex final : public Index {
     auto predicate UNUSED_ATTRIBUTE = [](const TupleSlot slot) -> bool { return false; };
     bool predicate_satisfied = false;
 
-    const bool UNUSED_ATTRIBUTE result = bplustree_->Insert(predicate, index_key, location, &predicate_satisfied);
+    const bool UNUSED_ATTRIBUTE result = bplustree_->Insert(index_key, location, &predicate_satisfied);
 
     TERRIER_ASSERT(
         result && !predicate_satisfied,
@@ -89,7 +89,7 @@ class BPlusTreeIndex final : public Index {
 
     // FIXME(15-721 project2): perform a non-unique CONDITIONAL insert into the underlying data structure of the
     // key/value pair
-    const bool result = bplustree_->Insert(predicate, index_key, location, &predicate_satisfied);
+    const bool result = bplustree_->Insert(index_key, location, &predicate_satisfied, predicate);
 
     TERRIER_ASSERT(predicate_satisfied != result, "If predicate is not satisfied then insertion should succeed.");
 
@@ -174,7 +174,7 @@ class BPlusTreeIndex final : public Index {
     };
 
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
-    for (auto *leaf = low_key_exists ? bplustree_->FindMinLeaf(index_high_key) : bplustree_->FindMinLeaf();
+    for (auto *leaf = low_key_exists ? bplustree_->FindMinLeafReadOnly(index_high_key) : bplustree_->FindMinLeafReadOnly();
          leaf != nullptr && (limit == 0 || value_list->size() < limit); leaf = leaf->right_) {
       if (!leaf->ScanRange(index_low_key, &index_high_key, value_list, predicate)) {
         break;
@@ -203,7 +203,7 @@ class BPlusTreeIndex final : public Index {
     std::function<bool(TupleSlot)> predicate = [&](TupleSlot tuple) { return IsVisible(txn, tuple); };
 
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
-    for (auto *leaf = bplustree_->FindMaxLeaf(index_high_key); leaf != nullptr; leaf = leaf->left_) {
+    for (auto *leaf = bplustree_->FindMaxLeafReadOnly(index_high_key); leaf != nullptr; leaf = leaf->left_) {
       if (!leaf->ScanRangeReverse(index_low_key, &index_high_key, value_list, predicate)) {
         break;
       }
@@ -228,7 +228,7 @@ class BPlusTreeIndex final : public Index {
     std::function<bool(TupleSlot)> predicate = [&](TupleSlot tuple) { return IsVisible(txn, tuple); };
 
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
-    for (auto *leaf = bplustree_->FindMaxLeaf(index_high_key); leaf != nullptr && value_list->size() < limit;
+    for (auto *leaf = bplustree_->FindMaxLeafReadOnly(index_high_key); leaf != nullptr && value_list->size() < limit;
          leaf = leaf->left_) {
       if (!leaf->ScanRangeReverse(index_low_key, &index_high_key, value_list, predicate)) {
         break;

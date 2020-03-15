@@ -13,7 +13,6 @@ namespace terrier {
 
 class BPlusTreeBenchmark : public benchmark::Fixture {
  public:
-  static bool always_false(int64_t i) { return false; }
   void SetUp(const benchmark::State &state) final {
     key_permutation_.reserve(num_keys_);
     for (uint32_t i = 0; i < num_keys_; i++) {
@@ -47,7 +46,7 @@ BENCHMARK_DEFINE_F(BPlusTreeBenchmark, RandomInsert)(benchmark::State &state) {
 
       for (uint32_t i = start_key; i < end_key; i++) {
         bool predicate_succeded = false;
-        tree->Insert(always_false, key_permutation_[i], key_permutation_[i], &predicate_succeded);
+        tree->Insert(key_permutation_[i], key_permutation_[i], &predicate_succeded);
       }
     };
 
@@ -77,7 +76,7 @@ BENCHMARK_DEFINE_F(BPlusTreeBenchmark, SequentialInsert)(benchmark::State &state
 
       for (uint32_t i = start_key; i < end_key; i++) {
         bool predicate_succeded = false;
-        tree->Insert(always_false, i, i, &predicate_succeded);
+        tree->Insert(i, i, &predicate_succeded);
       }
     };
 
@@ -100,7 +99,7 @@ BENCHMARK_DEFINE_F(BPlusTreeBenchmark, RandomInsertRandomRead)(benchmark::State 
   auto *const tree = BPlusTreeTestUtil::GetEmptyTree();
   for (uint32_t i = 0; i < num_keys_; i++) {
     bool predicate_succeded = false;
-    tree->Insert(always_false, key_permutation_[i], key_permutation_[i], &predicate_succeded);
+    tree->Insert(key_permutation_[i], key_permutation_[i], &predicate_succeded);
   }
 
   // NOLINTNEXTLINE
@@ -138,7 +137,7 @@ BENCHMARK_DEFINE_F(BPlusTreeBenchmark, RandomInsertSequentialRead)(benchmark::St
   auto *const tree = BPlusTreeTestUtil::GetEmptyTree();
   for (uint32_t i = 0; i < num_keys_; i++) {
     bool predicate_succeded = false;
-    tree->Insert(always_false, key_permutation_[i], key_permutation_[i], &predicate_succeded);
+    tree->Insert(key_permutation_[i], key_permutation_[i], &predicate_succeded);
   }
 
   // NOLINTNEXTLINE
@@ -176,7 +175,7 @@ BENCHMARK_DEFINE_F(BPlusTreeBenchmark, SequentialInsertRandomRead)(benchmark::St
   auto *const tree = BPlusTreeTestUtil::GetEmptyTree();
   for (uint32_t i = 0; i < num_keys_; i++) {
     bool p = false;
-    tree->Insert(always_false, i, i, &p);
+    tree->Insert(i, i, &p);
   }
 
   // NOLINTNEXTLINE
@@ -214,7 +213,7 @@ BENCHMARK_DEFINE_F(BPlusTreeBenchmark, SequentialInsertSequentialRead)(benchmark
   auto *const tree = BPlusTreeTestUtil::GetEmptyTree();
   for (uint32_t i = 0; i < num_keys_; i++) {
     bool p = false;
-    tree->Insert(always_false, i, i, &p);
+    tree->Insert(i, i, &p);
   }
 
   // NOLINTNEXTLINE
