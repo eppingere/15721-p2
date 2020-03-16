@@ -22,7 +22,9 @@
 namespace terrier::storage::index {
 
 /**
- * class BPlusTree - Latch Crabbing BPlusTree index implementation
+ * class BPlusTree - Latch minimized B+ Tree supporting optimistic inserts and deletes, with latch crabbing only used
+ * for splitting inserts. Uses thread-safe memory allocator and garbage collection queues per thread with epoch based
+ * garbage collection.
  *
  * Template Arguments:
  *
@@ -181,6 +183,7 @@ class BPlusTree {
 
     void Insert(pthread_t id) {
       common::SharedLatch::ScopedExclusiveLatch l(&latch_);
+      this->tree_->structure_size_ += sizeof(tbb::concurrent_queue<T>);
       map_.insert({id, new tbb::concurrent_queue<T>()});
     }
 
@@ -1425,11 +1428,13 @@ class BPlusTree {
     pthread_t id = pthread_self();
     if (UNLIKELY(!inner_node_new_node_map_.Exists(id))) {
       inner_node_new_node_map_.Insert(id);
+      this->tree_->structure_size += sizeof(InnerNode);
       return new InnerNode(this);
     }
     auto *q = inner_node_new_node_map_.LookUp(id);
     InnerNode *new_node;
     if (!q->try_pop(new_node)) {
+      this->tree_->structure_size += sizeof(InnerNode);
       return new InnerNode(this);
     }
     return new_node;
@@ -1443,11 +1448,13 @@ class BPlusTree {
     pthread_t id = pthread_self();
     if (UNLIKELY(!leaf_node_new_node_map_.Exists(id))) {
       leaf_node_new_node_map_.Insert(id);
+      this->tree_->structure_size += sizeof(LeafNode);
       return new LeafNode(this);
     }
     auto *q = leaf_node_new_node_map_.LookUp(id);
     LeafNode *new_node = nullptr;
     if (!q->try_pop(new_node)) {
+      this->tree_->structure_size += sizeof(LeafNode);
       return new LeafNode(this);
     }
     return new_node;
