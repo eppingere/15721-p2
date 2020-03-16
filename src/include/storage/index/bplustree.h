@@ -80,7 +80,14 @@ class BPlusTree {
   explicit BPlusTree(KeyComparator p_key_cmp_obj = KeyComparator{},
                      KeyEqualityChecker p_key_eq_obj = KeyEqualityChecker{}, KeyHashFunc p_key_hash_obj = KeyHashFunc{},
                      ValueEqualityChecker p_value_eq_obj = ValueEqualityChecker{})
-      : key_cmp_obj_{p_key_cmp_obj}, key_eq_obj_{p_key_eq_obj}, value_eq_obj_{p_value_eq_obj}, epoch_(1) {
+      : key_cmp_obj_{p_key_cmp_obj},
+        key_eq_obj_{p_key_eq_obj},
+        value_eq_obj_{p_value_eq_obj},
+        epoch_(1),
+        inner_node_new_node_map_(this),
+        leaf_node_new_node_map_(this),
+        inner_node_garbage_map_(this),
+        leaf_node_garbage_map_(this) {
     root_ = static_cast<BaseNode *>(this->NewLeafNode());
   }
 
@@ -99,9 +106,7 @@ class BPlusTree {
   static const uint16_t INNER_NODE_OPTIMAL_FILL = BRANCH_FACTOR / 2;
   static const uint16_t LEAF_SIZE = 32;  // cannot ever be less than 3
   static const uint16_t LEAF_OPTIMAL_FILL = LEAF_SIZE / 2;
-  static const uint64_t MAX_NUM_ACTIVE_EPOCHS = static_cast<uint64_t>(0x1) << 6;
-  static const uint64_t ALLOCATOR_ARRAY_SIZE = 1024;
-  static const uint64_t ALLOCATOR_START_SIZE = 10;
+  static const uint64_t MAX_NUM_ACTIVE_EPOCHS = static_cast<uint64_t>(0x1) << 3;
 
   // Constants
   static const uint64_t BITS_IN_UINT64 = 8 * sizeof(uint64_t);
@@ -159,6 +164,7 @@ class BPlusTree {
   template <class T>
   class ThreadToAllocatorMap {
    public:
+    explicit ThreadToAllocatorMap(BPlusTree *tree) : tree_(tree) {}
     ~ThreadToAllocatorMap() {
       common::SharedLatch::ScopedExclusiveLatch l(&latch_);
       for (auto it : map_) {
@@ -194,6 +200,7 @@ class BPlusTree {
 
     common::SharedLatch latch_;
     std::unordered_map<pthread_t, tbb::concurrent_queue<T> *> map_;
+    BPlusTree *tree_;
   };
 
   /**
@@ -1428,13 +1435,13 @@ class BPlusTree {
     pthread_t id = pthread_self();
     if (UNLIKELY(!inner_node_new_node_map_.Exists(id))) {
       inner_node_new_node_map_.Insert(id);
-      this->tree_->structure_size += sizeof(InnerNode);
+      structure_size_ += sizeof(InnerNode);
       return new InnerNode(this);
     }
     auto *q = inner_node_new_node_map_.LookUp(id);
     InnerNode *new_node;
     if (!q->try_pop(new_node)) {
-      this->tree_->structure_size += sizeof(InnerNode);
+      structure_size_ += sizeof(InnerNode);
       return new InnerNode(this);
     }
     return new_node;
@@ -1448,13 +1455,13 @@ class BPlusTree {
     pthread_t id = pthread_self();
     if (UNLIKELY(!leaf_node_new_node_map_.Exists(id))) {
       leaf_node_new_node_map_.Insert(id);
-      this->tree_->structure_size += sizeof(LeafNode);
+      structure_size_ += sizeof(LeafNode);
       return new LeafNode(this);
     }
     auto *q = leaf_node_new_node_map_.LookUp(id);
     LeafNode *new_node = nullptr;
     if (!q->try_pop(new_node)) {
-      this->tree_->structure_size += sizeof(LeafNode);
+      structure_size_ += sizeof(LeafNode);
       return new LeafNode(this);
     }
     return new_node;
@@ -1507,7 +1514,7 @@ class BPlusTree {
   KeyEqualityChecker key_eq_obj_;
   ValueEqualityChecker value_eq_obj_;
   std::atomic<uint64_t> active_epochs_[MAX_NUM_ACTIVE_EPOCHS] = {};
-  std::atomic<uint64_t> structure_size_ = 5;
+  std::atomic<uint64_t> structure_size_ = 0;
   std::atomic<uint64_t> epoch_ = MAX_NUM_ACTIVE_EPOCHS;
   std::atomic<BaseNode *> root_;
   ThreadToAllocatorMap<InnerNode *> inner_node_new_node_map_;
