@@ -21,7 +21,7 @@
 
 namespace terrier::storage::index {
 
-/*
+/**
  * class BPlusTree - Latch Crabbing BPlusTree index implementation
  *
  * Template Arguments:
@@ -68,7 +68,7 @@ template <typename KeyType, typename ValueType, typename KeyComparator = std::le
           typename ValueEqualityChecker = std::equal_to<ValueType>>
 class BPlusTree {
  public:
-  /*
+  /**
    * Constructor - Set up initial environment for BPlusTree
    *
    * Any tree instance will start with an empty leaf node as the root, which will then be filled.
@@ -104,7 +104,7 @@ class BPlusTree {
   // Constants
   static const uint64_t BITS_IN_UINT64 = 8 * sizeof(uint64_t);
 
-  /*
+  /**
    * KeyCmpLess() - Compare two keys for "less than" relation
    *
    * If key1 < key2 return true
@@ -117,33 +117,33 @@ class BPlusTree {
    */
   bool KeyCmpLess(const KeyType &key1, const KeyType &key2) const { return key_cmp_obj_(key1, key2); }
 
-  /*
+  /**
    * KeyCmpEqual() - Compare a pair of keys for equality
    *
    * This functions compares keys for equality relation
    */
   bool KeyCmpEqual(const KeyType &key1, const KeyType &key2) const { return key_eq_obj_(key1, key2); }
 
-  /*
+  /**
    * KeyCmpGreaterEqual() - Compare a pair of keys for >= relation
    *
    * It negates result of keyCmpLess()
    */
   bool KeyCmpGreaterEqual(const KeyType &key1, const KeyType &key2) const { return !KeyCmpLess(key1, key2); }
 
-  /*
+  /**
    * KeyCmpGreater() - Compare a pair of keys for > relation
    *
    * It flips input for keyCmpLess()
    */
   bool KeyCmpGreater(const KeyType &key1, const KeyType &key2) const { return KeyCmpLess(key2, key1); }
 
-  /*
+  /**
    * KeyCmpLessEqual() - Compare a pair of keys for <= relation
    */
   bool KeyCmpLessEqual(const KeyType &key1, const KeyType &key2) const { return !KeyCmpGreater(key1, key2); }
 
-  /*
+  /**
    * NodeType : an alias for our two node types
    */
   enum class NodeType : bool {
@@ -151,7 +151,7 @@ class BPlusTree {
     INNER_NODE = false,
   };
 
-  /*
+  /**
    * ThreadToAllocatorMap is a concurrent map of thread ids to concurrent queues.
    */
   template <class T>
@@ -193,7 +193,7 @@ class BPlusTree {
     std::unordered_map<pthread_t, tbb::concurrent_queue<T> *> map_;
   };
 
-  /*
+  /**
    * OptimisticResult: is a return value for the different results than an optimistic function can take on
    */
   enum class OptimisticResult : uint8_t {
@@ -202,7 +202,7 @@ class BPlusTree {
     RetryableFailure = 2,
   };
 
-  /*
+  /**
    * BaseNode is a super class for our two node types. It contains all their shared metadata as well as functions that
    * are shared among them. All nodes do not require latches when being read. Only require latches when being written
    * to.
@@ -232,12 +232,8 @@ class BPlusTree {
 
     uint16_t GetLimit() { return GetType() == NodeType::LEAF ? LEAF_SIZE : BRANCH_FACTOR - 1; }
 
-    void Lock() {
-      write_latch_.lock();
-    }
-    void Unlock() {
-      write_latch_.unlock();
-    }
+    void Lock() { write_latch_.lock(); }
+    void Unlock() { write_latch_.unlock(); }
 
     class ScopedWriteLatch {
      public:
@@ -247,7 +243,7 @@ class BPlusTree {
     };
   };
 
-  /*
+  /**
    * InnerNode: is a subclass of BaseNode. It serves as as BRANCH_FACTOR-way inner node of the tree. It contains
    * (BRANCH_FACTOR - 1) many keys that partition the ranges that inhabit its children. In inner node size tracks the
    * number of keys in the tree, which is on less than the number of children. Each key k at index i partitions children
@@ -279,9 +275,11 @@ class BPlusTree {
       q->push(this);
     }
 
-    /// FindMinChild: Finds the left-most child of this that could contain the given key
-    /// @param key : the given key
-    /// @return an index into children_ of the left-most child of this node that could contain the given key
+    /**
+     * FindMinChild: Finds the left-most child of this that could contain the given key
+     * @param key : the given key
+     * @return an index into children_ of the left-most child of this node that could contain the given key
+     */
     uint16_t FindMinChild(KeyType key) {
       uint16_t i;
       for (i = 0; i < this->size_.load(); i++)
@@ -290,9 +288,11 @@ class BPlusTree {
       return i;
     }
 
-    /// FindMaxChild: Finds the right-most child of this that could contain the given key
-    /// @param key : the given key
-    /// @return an index into children_ of the right-most child of this node that could contain the given key
+    /**
+     * FindMaxChild: Finds the right-most child of this that could contain the given key
+     * @param key : the given key
+     * @return an index into children_ of the right-most child of this node that could contain the given key
+     */
     BaseNode *FindMaxChild(KeyType key) {
       for (uint16_t i = this->size_ - 1; i < this->size_; i--)
         if (this->tree_->KeyCmpGreaterEqual(key, keys_[i])) return children_[i + 1];
@@ -300,9 +300,11 @@ class BPlusTree {
       return children_[0];
     }
 
-    /// InsertInner adds to the node this new key and its right child. Can only be called on not visible nodes.
-    /// @param key
-    /// @param child the right child of the given key
+    /**
+     * InsertInner adds to the node this new key and its right child. Can only be called on not visible nodes.
+     * @param key
+     * @param child the right child of the given key
+     */
     void InsertInner(KeyType key, BaseNode *child) {
       uint16_t j;
       for (j = 0; j < this->size_ && this->tree_->KeyCmpGreater(key, keys_[j]); j++) {
@@ -319,9 +321,11 @@ class BPlusTree {
       this->size_++;
     }
 
-    /// Merge generates a pointer to a merged version of this. Requires lock to be held on parent or the root if root
-    /// @return a pointer to a new node that balances this node and its children. Marks this node and all children
-    /// as deleted
+    /**
+     * Merge generates a pointer to a merged version of this. Requires lock to be held on parent or the root if root
+     * @return a pointer to a new node that balances this node and its children. Marks this node and all children
+     * as deleted
+     */
     InnerNode *Merge() {
       typename BaseNode::ScopedWriteLatch l(this);
       TERRIER_ASSERT(!this->deleted_, "we should never merge a deleted node");
@@ -381,8 +385,10 @@ class BPlusTree {
       return new_node;
     }
 
-    /// MergeAboveInnerNodes helper function for Merge. Implements merge if the innernode's children are innernodes
-    /// @return pointer to merged node
+    /**
+     * MergeAboveInnerNodes helper function for Merge. Implements merge if the inner node's children are inner nodes
+     * @return pointer to merged node
+     */
     InnerNode *MergeAboveInnerNodes() {
       std::vector<std::pair<KeyType, BaseNode *>> kvps;
 
@@ -442,8 +448,10 @@ class BPlusTree {
       return new_node;
     }
 
-    /// MergeAboveLeaves helper function for Merge. Implements merge if the innernode's children are leaves
-    /// @return pointer to merged node
+    /**
+     * MergeAboveLeaves helper function for Merge. Implements merge if the inner node's children are leaves
+     * @return pointer to merged node
+     */
     InnerNode *MergeAboveLeaves() {
       std::vector<std::pair<KeyType, ValueType>> kvps;
       for (uint16_t i = 0; i <= this->size_; i++) {
@@ -517,7 +525,7 @@ class BPlusTree {
     KeyType keys_[BRANCH_FACTOR - 1];
   };
 
-  /*
+  /**
    * LeafNode: is a subclass of BaseNode. All the instances in the tree create a linked list of nodes along the bottom
    * of the tree. It contains LEAF_NODE_SIZE many key value pairs. Pairs are not sorted inside of leaves. Deleted paris
    * are marked as tomb stoned using a bitmap.
@@ -550,11 +558,13 @@ class BPlusTree {
       q->push(this);
     }
 
-    /// ScanPredicate scans from this node to the right and evauates the given predicate on each equal key
-    /// @param key
-    /// @param predicate
-    /// @return bool representing whether the predicate returned true on any key in this node or any node to the right
-    /// of this node
+    /**
+     * ScanPredicate scans from this node to the right and evaluates the given predicate on each equal key
+     * @param key
+     * @param predicate
+     * @return bool representing whether the predicate returned true on any key in this node or any node to the right
+     * of this node
+     */
     bool ScanPredicate(KeyType key, std::function<bool(const ValueType)> predicate) {
       bool no_bigger_keys = true;
       for (LeafNode *current_leaf = this; current_leaf != nullptr && no_bigger_keys;
@@ -573,13 +583,15 @@ class BPlusTree {
       return false;
     }
 
-    /// InsertLeaf inserts given key and value into this node. Will only do so if the given predicate returns false on
-    /// all pairs with equal keys. Returns a bool indicating whether the insert succeded
-    /// @param key
-    /// @param value
-    /// @param predicate
-    /// @param predicate_satisfied return parameter of whether the predicate returned true on a equal key or not
-    /// @return bool indicating whether the insert succeded
+    /**
+     * InsertLeaf inserts given key and value into this node. Will only do so if the given predicate returns false on
+     * all pairs with equal keys. Returns a bool indicating whether the insert succeeded
+     * @param key
+     * @param value
+     * @param predicate
+     * @param predicate_satisfied return parameter of whether the predicate returned true on a equal key or not
+     * @return bool indicating whether the insert succeeded
+     */
     OptimisticResult InsertLeaf(KeyType key, ValueType value, std::function<bool(const ValueType)> predicate,
                                 bool *predicate_satisfied) {
       typename BaseNode::ScopedWriteLatch l(this);
@@ -614,12 +626,14 @@ class BPlusTree {
       return OptimisticResult::Success;
     }
 
-    /// ScanRange collects all values corresponding to keys between lo and hi where predicate returns true on the pair
-    /// @param low
-    /// @param hi
-    /// @param values return parameter in which result values are added
-    /// @param predicate
-    /// @return bool indicating whether the range ends in this node or could continue in the next node
+    /**
+     * ScanRange collects all values corresponding to keys between lo and hi where predicate returns true on the pair
+     * @param low
+     * @param hi
+     * @param values return parameter in which result values are added
+     * @param predicate
+     * @return bool indicating whether the range ends in this node or could continue in the next node
+     */
     bool ScanRange(KeyType low, KeyType *hi, std::vector<ValueType> *values,
                    std::function<bool(std::pair<KeyType, ValueType>)> predicate) {
       bool res = true;
@@ -648,12 +662,14 @@ class BPlusTree {
       return res;
     }
 
-    /// ScanRange collects all values corresponding to keys between lo and hi where predicate returns true on the value
-    /// @param low
-    /// @param hi
-    /// @param values return parameter in which result values are added
-    /// @param predicate
-    /// @return bool indicating whether the range ends in this node or could continue in the next node
+    /**
+     * ScanRange collects all values corresponding to keys between lo and hi where predicate returns true on the value
+     * @param low
+     * @param hi
+     * @param values return parameter in which result values are added
+     * @param predicate
+     * @return bool indicating whether the range ends in this node or could continue in the next node
+     */
     bool ScanRangeReverse(KeyType low, KeyType *hi, std::vector<ValueType> *values,
                           std::function<bool(ValueType)> predicate) {
       bool res = true;
@@ -681,18 +697,21 @@ class BPlusTree {
       return res;
     }
 
-    // TODO(emmanuel) use better bit ops???
-    /// IsReadable returns true if the key value pair at the given slot is readable or is tombstoned
-    /// @param i index of pair
-    /// @return bool representing wheter pair is readable or tombstoned
+    /**
+     * IsReadable returns true if the key value pair at the given slot is readable or is a tombstone
+     * @param i index of pair
+     * @return bool representing whether pair is readable or is a tombstone
+     */
     bool IsReadable(uint16_t i) {
       return !static_cast<bool>(
           (tomb_stones_[static_cast<uint64_t>(i) / BITS_IN_UINT64] >> (static_cast<uint64_t>(i) % BITS_IN_UINT64)) &
           static_cast<uint64_t>(0x1));
     }
 
-    /// MarkTombStone marks the pair at the given index as deleted
-    /// @param i index of pair
+    /**
+     * MarkTombStone marks the pair at the given index as deleted
+     * @param i index of pair
+     */
     void MarkTombStone(uint16_t i) {
       while (true) {
         uint64_t old_value = tomb_stones_[static_cast<uint64_t>(i) / BITS_IN_UINT64];
@@ -703,8 +722,10 @@ class BPlusTree {
       }
     }
 
-    /// UnmarkTombStone unmarks the pair at the given index as marked
-    /// @param i index of pair
+    /**
+     * UnmarkTombStone unmarks the pair at the given index as marked
+     * @param i index of pair
+     */
     void UnmarkTombStone(uint16_t i) {
       while (true) {
         uint64_t old_value = tomb_stones_[static_cast<uint64_t>(i) / BITS_IN_UINT64];
@@ -721,7 +742,7 @@ class BPlusTree {
     KeyType keys_[LEAF_SIZE];
   };
 
-  /*
+  /**
    * ReclaimOldNodes finds the most recent safe epoch to mark as completed and then moves all nodes from that epoch to
    * be able to be allocated.
    */
@@ -794,30 +815,36 @@ class BPlusTree {
     }
   }
 
-  /*
+  /**
    * RunGarbageCollection reclaims all deleted nodes and recycles them
    */
   void RunGarbageCollection() { ReclaimOldNodes(); }
 
-  /// StartFunction records that a function was started. Returns the epoch in which the function was started
-  /// @return the epoch in which the function was started
+  /**
+   * StartFunction records that a function was started. Returns the epoch in which the function was started
+   * @return the epoch in which the function was started
+   */
   uint64_t StartFunction() {
     uint64_t current_epoch = epoch_;
     active_epochs_[current_epoch % MAX_NUM_ACTIVE_EPOCHS]++;
     return current_epoch;
   }
 
-  /// EndFunction marks that a function that was started at the given epoch has ended
-  /// @param start_epoch epoch in which the function was started
+  /**
+   * EndFunction marks that a function that was started at the given epoch has ended
+   * @param start_epoch epoch in which the function was started
+   */
   void EndFunction(uint64_t start_epoch) { active_epochs_[start_epoch % MAX_NUM_ACTIVE_EPOCHS]--; }
 
-  /// OptimisticInsert inserts under the assumption that the leaf node into which the pair is inserted will not split
-  /// evaluates the predicate on all values that have equal keys
-  /// @param predicate predicate to be evaluated on all equal keys
-  /// @param key
-  /// @param val
-  /// @param predicate_satisfied bool representing whether the predicate returned true on the value of an equal key
-  /// @return bool representing whether the insert succeeded
+  /**
+   * OptimisticInsert inserts under the assumption that the leaf node into which the pair is inserted will not split
+   * evaluates the predicate on all values that have equal keys
+   * @param predicate predicate to be evaluated on all equal keys
+   * @param key
+   * @param val
+   * @param predicate_satisfied bool representing whether the predicate returned true on the value of an equal key
+   * @return bool representing whether the insert succeeded
+   */
   bool OptimisticInsert(std::function<bool(const ValueType)> predicate, KeyType key, ValueType val,
                         bool *predicate_satisfied) {
     OptimisticResult result = FindMinLeaf(key)->InsertLeaf(key, val, predicate, predicate_satisfied);
@@ -827,15 +854,17 @@ class BPlusTree {
     return (result == OptimisticResult::Success);
   }
 
-  /// InsertHelper Helper function for insert. Actually implements the insertion. Calls Optimistic insert. If
-  /// OptimisticInsert insert fails it takes write locks down the tree using lock crabbing and preforms a split leaf
-  /// node and all necessary ancestors.
-  /// @param predicate must return false values associated with all equal keys for insert to succeed
-  /// @param key
-  /// @param val
-  /// @param predicate_satisfied return value indicating whether the predicate returned true on values associated with
-  /// equal keys
-  /// @return bool indicating whether the insert succeeded
+  /**
+   * InsertHelper Helper function for insert. Actually implements the insertion. Calls Optimistic insert. If
+   * OptimisticInsert insert fails it takes write locks down the tree using lock crabbing and preforms a split leaf
+   * node and all necessary ancestors.
+   * @param predicate must return false values associated with all equal keys for insert to succeed
+   * @param key
+   * @param val
+   * @param predicate_satisfied return value indicating whether the predicate returned true on values associated with
+   * equal keys
+   * @return bool indicating whether the insert succeeded
+   */
   bool InsertHelper(std::function<bool(const ValueType)> predicate, KeyType key, ValueType val,
                     bool *predicate_satisfied) {
     if (OptimisticInsert(predicate, key, val, predicate_satisfied)) {
@@ -1101,12 +1130,14 @@ class BPlusTree {
     return true;
   }
 
-  /// Insert inserts given key value pair into tree if the predicate provided returns true on value associated with key
-  /// @param predicate must return false values associated with all equal keys for insert to succeed
-  /// @param key
-  /// @param val
-  /// @param predicate_satisfied return value indicating whether the predicate returned true on values associated with
-  /// @return bool indicating whether the insert succeeded
+  /**
+   * Insert inserts given key value pair into tree if the predicate provided returns true on value associated with key
+   * @param predicate must return false values associated with all equal keys for insert to succeed
+   * @param key
+   * @param val
+   * @param predicate_satisfied return value indicating whether the predicate returned true on values associated with
+   * @return bool indicating whether the insert succeeded
+   */
   bool Insert(
       KeyType key, ValueType val, bool *predicate_satisfied,
       std::function<bool(const ValueType)> predicate = [](ValueType v) { return false; }) {
@@ -1116,11 +1147,13 @@ class BPlusTree {
     return result;
   }
 
-  /// ScanKeyHelper helper function for ScanKey. Returns vector of all values associated with the given key on which
-  /// the given predicate returns true
-  /// @param key
-  /// @param values return vector of values associated with key on which the predicate returns true
-  /// @param predicate
+  /**
+   * ScanKeyHelper helper function for ScanKey. Returns vector of all values associated with the given key on which
+   * the given predicate returns true
+   * @param key
+   * @param values return vector of values associated with key on which the predicate returns true
+   * @param predicate
+   */
   void ScanKeyHelper(KeyType key, std::vector<ValueType> *values, std::function<bool(ValueType)> predicate) {
     bool done = false;
     for (auto *leaf = FindMinLeafReadOnly(key); leaf != nullptr && !done; leaf = leaf->right_) {
@@ -1136,11 +1169,13 @@ class BPlusTree {
     }
   }
 
-  /// ScanKey Returns vector of all values associated with the given key on which
-  /// the given predicate returns true
-  /// @param key
-  /// @param values return vector of values associated with key on which the predicate returns true
-  /// @param predicate
+  /**
+   * ScanKey Returns vector of all values associated with the given key on which
+   * the given predicate returns true
+   * @param key
+   * @param values return vector of values associated with key on which the predicate returns true
+   * @param predicate
+   */
   void ScanKey(
       KeyType key, std::vector<ValueType> *values,
       std::function<bool(ValueType)> predicate = [](ValueType v) { return true; }) {
@@ -1149,10 +1184,12 @@ class BPlusTree {
     EndFunction(epoch);
   }
 
-  /// RemoveHelper Helper function for Remove. Removes key value pair given
-  /// @param key
-  /// @param value
-  /// @return bool representing whether pair was successful
+  /**
+   * RemoveHelper Helper function for Remove. Removes key value pair given
+   * @param key
+   * @param value
+   * @return bool representing whether pair was successful
+   */
   bool RemoveHelper(KeyType key, ValueType value) {
     bool done = false;
     while (true) {
@@ -1178,10 +1215,12 @@ class BPlusTree {
     }
   }
 
-  /// Remove Removes key value pair given
-  /// @param key
-  /// @param value
-  /// @return bool representing wheter pair was successfull
+  /**
+   * Remove Removes key value pair given
+   * @param key
+   * @param value
+   * @return bool representing whether pair was successful
+   */
   bool Remove(KeyType key, ValueType value) {
     uint64_t epoch = StartFunction();
     bool result = RemoveHelper(key, value);
@@ -1189,11 +1228,13 @@ class BPlusTree {
     return result;
   }
 
-  /// MergeToDepth Recurses on all subchildren until the given node is at the max depth. Then merges and replaces all
-  /// chilren of the given node.
-  /// @param node
-  /// @param max_depth max depth to be reached before merging
-  /// @param current_depth current depth in the tree
+  /**
+   * MergeToDepth Recurses on all subchildren until the given node is at the max depth. Then merges and replaces all
+   * chilren of the given node.
+   * @param node
+   * @param max_depth max depth to be reached before merging
+   * @param current_depth current depth in the tree
+   */
   void MergeToDepth(InnerNode *node, uint64_t max_depth, uint64_t current_depth) {
     if (UNLIKELY(node->GetType() == NodeType::LEAF || node->deleted_)) {
       return;
@@ -1218,8 +1259,10 @@ class BPlusTree {
     }
   }
 
-  /// CompressTree compresses the given tree my merging all mergable nodes. Does so by iteative shallowing and merging
-  /// from the bottom up. As a result, the tree is able to be compressed without blocking inserts or reads.
+  /**
+   * CompressTree compresses the given tree my merging all mergeable nodes. Does so by iterative shallowing and merging
+   * from the bottom up. As a result, the tree is able to be compressed without blocking inserts or reads.
+   */
   void CompressTree() {
     uint64_t depth = GetDepth();
     if (depth == 1) {
@@ -1245,8 +1288,10 @@ class BPlusTree {
     }
   }
 
-  /// GetDepth retuns the depth of the tree
-  /// @return
+  /**
+   * GetDepth returns the depth of the tree
+   * @return depth of tree
+   */
   uint64_t GetDepth() {
     uint64_t d = 1;
     BaseNode *n = root_;
@@ -1257,8 +1302,10 @@ class BPlusTree {
     return d;
   }
 
-  /// FindMinLeaf finds the minimum leaf in the tree
-  /// @return pointer to the right most leaf of the tree
+  /**
+   * FindMinLeaf finds the minimum leaf in the tree
+   * @return pointer to the right most leaf of the tree
+   */
   LeafNode *FindMinLeaf() {
     while (true) {
     OuterLoop:
@@ -1277,9 +1324,11 @@ class BPlusTree {
     }
   }
 
-  /// FindMinLeafReadOnly finds the minimum leaf in the tree. Does not check for deleted nodes and can be used for
-  /// read only functions
-  /// @return pointer to the right most leaf of the tree
+  /**
+   * FindMinLeafReadOnly finds the minimum leaf in the tree. Does not check for deleted nodes and can be used for
+   * read only functions
+   * @return pointer to the right most leaf of the tree
+   */
   LeafNode *FindMinLeafReadOnly() {
     BaseNode *n = root_;
     while (n->GetType() != NodeType::LEAF) {
@@ -1289,8 +1338,10 @@ class BPlusTree {
     return static_cast<LeafNode *>(n);
   }
 
-  /// FindMinLeaf finds the minimum leaf in the tree that could contain the given key
-  /// @return pointer to the right most leaf of the tree that could contain the given key
+  /**
+   * FindMinLeaf finds the minimum leaf in the tree that could contain the given key
+   * @return pointer to the right most leaf of the tree that could contain the given key
+   */
   LeafNode *FindMinLeaf(KeyType key) {
     while (true) {
     OuterLoop:
@@ -1310,9 +1361,11 @@ class BPlusTree {
     }
   }
 
-  /// FindMinLeafReadOnly finds the minimum leaf in the tree that could contain the given key.
-  /// Does not check for deleted nodes and can be used for read only functions
-  /// @return pointer to the right most leaf of the tree that could contain the given key
+  /**
+   * FindMinLeafReadOnly finds the minimum leaf in the tree that could contain the given key.
+   * Does not check for deleted nodes and can be used for read only functions
+   * @return pointer to the right most leaf of the tree that could contain the given key
+   */
   LeafNode *FindMinLeafReadOnly(KeyType key) {
     BaseNode *n = root_;
     while (n->GetType() != NodeType::LEAF) {
@@ -1323,8 +1376,10 @@ class BPlusTree {
     return static_cast<LeafNode *>(n);
   }
 
-  /// FindMaxLeafReadOnly finds the maximum leaf in the tree. Can only be used in read only functions
-  /// @return pointer to the left most leaf of the tree
+  /**
+   * FindMaxLeafReadOnly finds the maximum leaf in the tree. Can only be used in read only functions
+   * @return pointer to the left most leaf of the tree
+   */
   LeafNode *FindMaxLeafReadOnly() {
     BaseNode *n = root_;
     while (n->GetType() != NodeType::LEAF) {
@@ -1334,9 +1389,11 @@ class BPlusTree {
     return static_cast<LeafNode *>(n);
   }
 
-  /// FindMaxLeafReadOnly finds the maximum leaf in the tree that could contain the given key. Can only be
-  /// used in read only functions
-  /// @return pointer to the left most leaf of the tree that could contain the given key
+  /**
+   * FindMaxLeafReadOnly finds the maximum leaf in the tree that could contain the given key. Can only be
+   * used in read only functions
+   * @return pointer to the left most leaf of the tree that could contain the given key
+   */
   LeafNode *FindMaxLeafReadOnly(KeyType key) {
     BaseNode *n = root_;
     while (n->GetType() != NodeType::LEAF) {
@@ -1346,24 +1403,24 @@ class BPlusTree {
     return static_cast<LeafNode *>(n);
   }
 
-  /// LatchRoot locks modificiation the root. Does not block reading
-  void LatchRoot() {
-    //    bool t = true;
-    //    bool f = false;
-    //    while (!root_latch_.compare_exchange_strong(f, t)) {}
-    //    TERRIER_ASSERT(root_latch_, "root latch should be held");
-    root_latch_.Lock();
-  }
+  /**
+   * LatchRoot locks modification the root. Does not block reading
+   */
+  void LatchRoot() { root_latch_.Lock(); }
 
-  /// UnlatchRoot unlocks modificiation the root
+  /**
+   * UnlatchRoot unlocks modification the root
+   */
   void UnlatchRoot() {
     //    TERRIER_ASSERT(root_latch_, "root latch should be held");
     //    root_latch_ = false;
     root_latch_.Unlock();
   }
 
-  /// NewInnerNode finds a new inner node. Does so with a per-thread allocator
-  /// @return a free node
+  /**
+   * NewInnerNode finds a new inner node. Does so with a per-thread allocator
+   * @return a free node
+   */
   InnerNode *NewInnerNode() {
     pthread_t id = pthread_self();
     if (UNLIKELY(!inner_node_new_node_map_.Exists(id))) {
@@ -1378,8 +1435,10 @@ class BPlusTree {
     return new_node;
   }
 
-  /// NewLeafNode finds a new leaf node. Does so with a per-thread allocator
-  /// @return a free node
+  /**
+   * NewLeafNode finds a new leaf node. Does so with a per-thread allocator
+   * @return a free node
+   */
   LeafNode *NewLeafNode() {
     pthread_t id = pthread_self();
     if (UNLIKELY(!leaf_node_new_node_map_.Exists(id))) {
