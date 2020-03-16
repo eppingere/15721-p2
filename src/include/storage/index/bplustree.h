@@ -697,7 +697,7 @@ class BPlusTree {
     void MarkTombStone(uint16_t i) {
       while (true) {
         uint64_t old_value = tomb_stones_[static_cast<uint64_t>(i) / BITS_IN_UINT64];
-        uint16_t new_value = old_value | (static_cast<uint64_t>(0x1) << (static_cast<uint64_t>(i) % BITS_IN_UINT64));
+        uint64_t new_value = old_value | (static_cast<uint64_t>(0x1) << (static_cast<uint64_t>(i) % BITS_IN_UINT64));
         if (!tomb_stones_[static_cast<uint64_t>(i) / BITS_IN_UINT64].compare_exchange_strong(old_value, new_value))
           continue;
         return;
@@ -709,7 +709,7 @@ class BPlusTree {
     void UnmarkTombStone(uint16_t i) {
       while (true) {
         uint64_t old_value = tomb_stones_[static_cast<uint64_t>(i) / BITS_IN_UINT64];
-        uint16_t new_value = old_value & (~(static_cast<uint64_t>(0x1) << (static_cast<uint64_t>(i) % BITS_IN_UINT64)));
+        uint64_t new_value = old_value & (~(static_cast<uint64_t>(0x1) << (static_cast<uint64_t>(i) % BITS_IN_UINT64)));
         if (!tomb_stones_[static_cast<uint64_t>(i) / BITS_IN_UINT64].compare_exchange_strong(old_value, new_value))
           continue;
         return;
@@ -1175,8 +1175,8 @@ class BPlusTree {
           }
         }
       }
+      return false;
     }
-    return false;
   }
 
   /// Remove Removes key value pair given
@@ -1409,13 +1409,13 @@ class BPlusTree {
     LeafNode* min_leaf = FindMinLeafReadOnly();
     LeafNode* max_leaf = FindMaxLeafReadOnly();
     LeafNode* leaf;
-    for (leaf = min_leaf; leaf != nullptr; leaf = leaf->right_) {}
+    for (leaf = min_leaf; leaf->right_ != nullptr; leaf = leaf->right_) {}
     TERRIER_ASSERT(leaf == max_leaf, "max leaf should be reachable from min leaf");
 
-    for (leaf = max_leaf; leaf != nullptr; leaf = leaf->left) {}
+    for (leaf = max_leaf; leaf->left_ != nullptr; leaf = leaf->left_) {}
     TERRIER_ASSERT(leaf == min_leaf, "min leaf should be reachable from max leaf");
 
-    IterateTree(root_.load(), [this](BaseNode *node) {
+    IterateTree(root_.load(), [&](BaseNode *node) {
       TERRIER_ASSERT(!node->deleted_, "in single thread no deleted nodes should be visible");
       if (node->GetType() == NodeType::LEAF) {
         return;

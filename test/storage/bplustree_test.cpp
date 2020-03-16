@@ -10,7 +10,7 @@ namespace terrier::storage::index {
 
 struct BPlusTreeTests : public TerrierTest {
   BPlusTree<uint64_t, uint64_t> *test_tree_;
-  uint64_t num_inserts_ = 120000;
+  uint64_t num_inserts_ = 100000;
 };
 
 TEST_F(BPlusTreeTests, CompressTest1) {
@@ -51,7 +51,9 @@ TEST_F(BPlusTreeTests, CompressTest1) {
     compressed_leaves++;
 
   EXPECT_EQ(compress_depth, start_depth);
-  EXPECT_EQ(compressed_leaves, num_start_leaves / (BPlusTree<uint64_t, uint64_t>::LEAF_SIZE / 2));
+  uint64_t estimated_leaves = num_inserts_ / (BPlusTree<uint64_t, uint64_t>::LEAF_SIZE / 2) / (BPlusTree<uint64_t, uint64_t>::BRANCH_FACTOR / 2);
+  EXPECT_TRUE(estimated_leaves == 0 || compressed_leaves >= (estimated_leaves - 1));
+  EXPECT_TRUE(estimated_leaves == std::numeric_limits<uint64_t >::max() || compressed_leaves <= (estimated_leaves + 1));
 }
 
 TEST_F(BPlusTreeTests, CompressTest2) {
@@ -177,8 +179,8 @@ TEST_F(BPlusTreeTests, RepeatInserts) {
   for (uint64_t i = 0; i < num_inserts_; i++) {
     bool rand = false;
     EXPECT_TRUE(test_tree_->Insert(i, i, &rand));
-    test_tree_->CheckTree();
   }
+  test_tree_->CheckTree();
 
   std::vector<uint64_t> results;
   for (uint64_t i = 0; i < num_inserts_; i++) {
@@ -186,36 +188,36 @@ TEST_F(BPlusTreeTests, RepeatInserts) {
     EXPECT_EQ(results.size(), 1);
     EXPECT_EQ(results[0], i);
     results.clear();
-    test_tree_->CheckTree();
   }
+  test_tree_->CheckTree();
 
   for (uint64_t i = 0; i < num_inserts_; i++) {
     bool rand = true;
-    EXPECT_TRUE(test_tree_->Insert(i, i, &rand));
-    test_tree_->CheckTree();
+    EXPECT_FALSE(test_tree_->Insert(i, i, &rand, [] (uint64_t i) { return true; }));
   }
+  test_tree_->CheckTree();
 
   for (uint64_t i = 0; i < num_inserts_; i++) {
     test_tree_->ScanKey(i, &results, [](uint64_t val) { return true; });
     EXPECT_EQ(results.size(), 1);
     EXPECT_EQ(results[0], i);
     results.clear();
-    test_tree_->CheckTree();
   }
+  test_tree_->CheckTree();
 
   for (uint64_t i = 0; i < num_inserts_; i++) {
     bool rand = false;
     EXPECT_TRUE(test_tree_->Insert(i, i, &rand));
-    test_tree_->CheckTree();
   }
+  test_tree_->CheckTree();
 
   for (uint64_t i = 0; i < num_inserts_; i++) {
     test_tree_->ScanKey(i, &results, [](uint64_t val) { return true; });
     EXPECT_EQ(results.size(), 2);
     EXPECT_EQ(results[0], i);
     results.clear();
-    test_tree_->CheckTree();
   }
+  test_tree_->CheckTree();
 }
 
 TEST_F(BPlusTreeTests,  SimpleInsert) {
@@ -224,8 +226,8 @@ TEST_F(BPlusTreeTests,  SimpleInsert) {
   for (uint64_t i = 0; i < BPlusTree<uint64_t, uint64_t>::LEAF_SIZE; i++) {
     bool rand = false;
     EXPECT_TRUE(test_tree_->Insert(i, i, &rand));
-    test_tree_->CheckTree();
   }
+  test_tree_->CheckTree();
 
   std::vector<uint64_t> results;
   for (uint64_t i = 0; i < BPlusTree<uint64_t, uint64_t>::LEAF_SIZE; i++) {
@@ -233,8 +235,8 @@ TEST_F(BPlusTreeTests,  SimpleInsert) {
     EXPECT_EQ(results.size(), 1);
     EXPECT_EQ(results[0], i);
     results.clear();
-    test_tree_->CheckTree();
   }
+  test_tree_->CheckTree();
 }
 
 TEST_F(BPlusTreeTests,  SplitInsert) {
@@ -243,8 +245,8 @@ TEST_F(BPlusTreeTests,  SplitInsert) {
   for (uint64_t i = 0; i < BPlusTree<uint64_t, uint64_t>::LEAF_SIZE + 1; i++) {
     bool rand = false;
     EXPECT_TRUE(test_tree_->Insert(i, i, &rand));
-    test_tree_->CheckTree();
   }
+  test_tree_->CheckTree();
 
   std::vector<uint64_t> results;
   for (uint64_t i = 0; i < BPlusTree<uint64_t, uint64_t>::LEAF_SIZE + 1; i++) {
@@ -252,8 +254,8 @@ TEST_F(BPlusTreeTests,  SplitInsert) {
     EXPECT_EQ(results.size(), 1);
     EXPECT_EQ(results[0], i);
     results.clear();
-    test_tree_->CheckTree();
   }
+  test_tree_->CheckTree();
 }
 
 TEST_F(BPlusTreeTests,  SimpleDelete) {
@@ -262,8 +264,8 @@ TEST_F(BPlusTreeTests,  SimpleDelete) {
   for (uint64_t i = 0; i < BPlusTree<uint64_t, uint64_t>::LEAF_SIZE; i++) {
     bool rand = false;
     EXPECT_TRUE(test_tree_->Insert(i, i, &rand));
-    test_tree_->CheckTree();
   }
+  test_tree_->CheckTree();
 
   std::vector<uint64_t> results;
   for (uint64_t i = 0; i < BPlusTree<uint64_t, uint64_t>::LEAF_SIZE; i++) {
@@ -271,25 +273,25 @@ TEST_F(BPlusTreeTests,  SimpleDelete) {
     EXPECT_EQ(results.size(), 1);
     EXPECT_EQ(results[0], i);
     results.clear();
-    test_tree_->CheckTree();
   }
+  test_tree_->CheckTree();
 
   for (uint64_t i = 0; i < BPlusTree<uint64_t, uint64_t>::LEAF_SIZE; i += 2) {
     EXPECT_TRUE(test_tree_->Remove(i, i));
-    test_tree_->CheckTree();
   }
+  test_tree_->CheckTree();
 
   for (uint64_t i = 0; i < BPlusTree<uint64_t, uint64_t>::LEAF_SIZE; i++) {
     test_tree_->ScanKey(i, &results, [](uint64_t val) { return true; });
     if (i % 2 == 0) {
+      EXPECT_EQ(results.size(), 0);
+    } else {
       EXPECT_EQ(results.size(), 1);
       EXPECT_EQ(results[0], i);
-    } else {
-      EXPECT_EQ(results.size(), 0);
     }
     results.clear();
-    test_tree_->CheckTree();
   }
+  test_tree_->CheckTree();
 }
 
 TEST_F(BPlusTreeTests,  FullDelete) {
@@ -298,8 +300,8 @@ TEST_F(BPlusTreeTests,  FullDelete) {
   for (uint64_t i = 0; i < num_inserts_; i++) {
     bool rand = false;
     EXPECT_TRUE(test_tree_->Insert(i, i, &rand));
-    test_tree_->CheckTree();
   }
+  test_tree_->CheckTree();
 
   std::vector<uint64_t> results;
   for (uint64_t i = 0; i < num_inserts_; i++) {
@@ -307,42 +309,41 @@ TEST_F(BPlusTreeTests,  FullDelete) {
     EXPECT_EQ(results.size(), 1);
     EXPECT_EQ(results[0], i);
     results.clear();
-    test_tree_->CheckTree();
   }
+  test_tree_->CheckTree();
 
   for (uint64_t i = 0; i < num_inserts_; i += 2) {
     EXPECT_TRUE(test_tree_->Remove(i, i));
-    test_tree_->CheckTree();
   }
+  test_tree_->CheckTree();
 
   for (uint64_t i = 0; i < num_inserts_; i++) {
     test_tree_->ScanKey(i, &results, [](uint64_t val) { return true; });
     if (i % 2 == 0) {
+      EXPECT_EQ(results.size(), 0);
+    } else {
       EXPECT_EQ(results.size(), 1);
       EXPECT_EQ(results[0], i);
-    } else {
-      EXPECT_EQ(results.size(), 0);
     }
     results.clear();
-    test_tree_->CheckTree();
   }
+  test_tree_->CheckTree();
 
   for (uint64_t i = 0; i < num_inserts_; i++) {
     if (i % 2 == 0) {
       EXPECT_FALSE(test_tree_->Remove(i, i));
-      test_tree_->CheckTree();
     } else {
       EXPECT_TRUE(test_tree_->Remove(i, i));
-      test_tree_->CheckTree();
     }
   }
+  test_tree_->CheckTree();
 
   for (uint64_t i = 0; i < num_inserts_; i++) {
     test_tree_->ScanKey(i, &results, [](uint64_t val) { return true; });
     EXPECT_EQ(results.size(), 0);
     results.clear();
-    test_tree_->CheckTree();
   }
+  test_tree_->CheckTree();
 }
 
 }  // namespace terrier::storage::index
