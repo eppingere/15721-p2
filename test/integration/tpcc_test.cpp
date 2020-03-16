@@ -33,7 +33,7 @@ class TPCCTests : public TerrierTest {
 
   std::default_random_engine generator_;
 
-  const int8_t num_threads_ = 1;  // defines the number of terminals (workers running txns) and warehouses for the
+  const int8_t num_threads_ = 7;  // defines the number of terminals (workers running txns) and warehouses for the
   // benchmark. Sometimes called scale factor
   const uint32_t num_precomputed_txns_per_worker_ = 10000;  // Number of txns to run per terminal (worker thread)
   TransactionWeights txn_weights_;                          // default txn_weights. See definition for values

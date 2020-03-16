@@ -141,18 +141,18 @@ class BPlusTreeIndex final : public Index {
     // Perform lookup in BPlusTree
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
 
-    //    std::vector<TupleSlot> results;
+    std::vector<TupleSlot> results;
 
     // Perform lookup in BwTree
-    bplustree_->ScanKey(index_key, value_list, [&txn](TupleSlot s) { return IsVisible(txn, s); });
+    bplustree_->ScanKey(index_key, &results);
 
-    //    // Avoid resizing our value_list, even if it means over-provisioning
-    //    value_list->reserve(results.size());
-    //
-    //    // Perform visibility check on result
-    //    for (const auto &result : results) {
-    //      if (IsVisible(txn, result)) value_list->emplace_back(result);
-    //    }
+    // Avoid resizing our value_list, even if it means over-provisioning
+    value_list->reserve(results.size());
+
+    // Perform visibility check on result
+    for (const auto &result : results) {
+      if (IsVisible(txn, result)) value_list->emplace_back(result);
+    }
 
     TERRIER_ASSERT(!(metadata_.GetSchema().Unique()) || (metadata_.GetSchema().Unique() && value_list->size() <= 1),
                    "Invalid number of results for unique index.");

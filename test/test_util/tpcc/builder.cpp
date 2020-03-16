@@ -304,7 +304,7 @@ Database *Builder::Build(const storage::index::IndexType index_type) {
                    "Constructed the wrong index key type.");
     TERRIER_ASSERT(stock_index->KeyKind() == storage::index::IndexKeyKind::HASHKEY,
                    "Constructed the wrong index key type.");
-  } else {
+  } else if (index_type == storage::index::IndexType::BPLUSTREE) {
     TERRIER_ASSERT(index_type == storage::index::IndexType::BPLUSTREE,
                    "This branch expects the BwTree. Did you add another IndexType to the system?");
     TERRIER_ASSERT(warehouse_index->Type() == storage::index::IndexType::BPLUSTREE,
@@ -322,6 +322,45 @@ Database *Builder::Build(const storage::index::IndexType index_type) {
                    "Constructed the wrong index type.");
     TERRIER_ASSERT(item_index->Type() == storage::index::IndexType::BPLUSTREE, "Constructed the wrong index type.");
     TERRIER_ASSERT(stock_index->Type() == storage::index::IndexType::BPLUSTREE, "Constructed the wrong index type.");
+
+    TERRIER_ASSERT(warehouse_index->KeyKind() == storage::index::IndexKeyKind::COMPACTINTSKEY,
+                   "Constructed the wrong index key type.");
+    TERRIER_ASSERT(district_index->KeyKind() == storage::index::IndexKeyKind::COMPACTINTSKEY,
+                   "Constructed the wrong index key type.");
+    TERRIER_ASSERT(customer_index->KeyKind() == storage::index::IndexKeyKind::COMPACTINTSKEY,
+                   "Constructed the wrong index key type.");
+    TERRIER_ASSERT(customer_secondary_index->KeyKind() == storage::index::IndexKeyKind::GENERICKEY,
+                   "Constructed the wrong index key type.");
+    TERRIER_ASSERT(new_order_index->KeyKind() == storage::index::IndexKeyKind::COMPACTINTSKEY,
+                   "Constructed the wrong index key type.");
+    TERRIER_ASSERT(order_index->KeyKind() == storage::index::IndexKeyKind::COMPACTINTSKEY,
+                   "Constructed the wrong index type.");
+    TERRIER_ASSERT(order_secondary_index->KeyKind() == storage::index::IndexKeyKind::COMPACTINTSKEY,
+                   "Constructed the wrong index key type.");
+    TERRIER_ASSERT(order_line_index->KeyKind() == storage::index::IndexKeyKind::COMPACTINTSKEY,
+                   "Constructed the wrong index key type.");
+    TERRIER_ASSERT(item_index->KeyKind() == storage::index::IndexKeyKind::COMPACTINTSKEY,
+                   "Constructed the wrong index key type.");
+    TERRIER_ASSERT(stock_index->KeyKind() == storage::index::IndexKeyKind::COMPACTINTSKEY,
+                   "Constructed the wrong index key type.");
+  } else {
+    TERRIER_ASSERT(index_type == storage::index::IndexType::BWTREE,
+                   "This branch expects the BwTree. Did you add another IndexType to the system?");
+    TERRIER_ASSERT(warehouse_index->Type() == storage::index::IndexType::BWTREE,
+                   "Constructed the wrong index type.");
+    TERRIER_ASSERT(district_index->Type() == storage::index::IndexType::BWTREE, "Constructed the wrong index type.");
+    TERRIER_ASSERT(customer_index->Type() == storage::index::IndexType::BWTREE, "Constructed the wrong index type.");
+    TERRIER_ASSERT(customer_secondary_index->Type() == storage::index::IndexType::BWTREE,
+                   "Constructed the wrong index type.");
+    TERRIER_ASSERT(new_order_index->Type() == storage::index::IndexType::BWTREE,
+                   "Constructed the wrong index type.");
+    TERRIER_ASSERT(order_index->Type() == storage::index::IndexType::BWTREE, "Constructed the wrong index type.");
+    TERRIER_ASSERT(order_secondary_index->Type() == storage::index::IndexType::BWTREE,
+                   "Constructed the wrong index type.");
+    TERRIER_ASSERT(order_line_index->Type() == storage::index::IndexType::BWTREE,
+                   "Constructed the wrong index type.");
+    TERRIER_ASSERT(item_index->Type() == storage::index::IndexType::BWTREE, "Constructed the wrong index type.");
+    TERRIER_ASSERT(stock_index->Type() == storage::index::IndexType::BWTREE, "Constructed the wrong index type.");
 
     TERRIER_ASSERT(warehouse_index->KeyKind() == storage::index::IndexKeyKind::COMPACTINTSKEY,
                    "Constructed the wrong index key type.");
