@@ -1,6 +1,8 @@
 #pragma once
 
 #include <common/shared_latch.h>
+#include "execution/sql/memory_pool.h"
+#include "execution/sql/memory_tracker.h"
 #include <execution/util/execution_common.h>
 #include <pthread.h>
 #include <storage/storage_defs.h>
@@ -78,12 +80,11 @@ class BPlusTree {
   explicit BPlusTree(KeyComparator p_key_cmp_obj = KeyComparator{},
                      KeyEqualityChecker p_key_eq_obj = KeyEqualityChecker{}, KeyHashFunc p_key_hash_obj = KeyHashFunc{},
                      ValueEqualityChecker p_value_eq_obj = ValueEqualityChecker{})
-      : key_cmp_obj_{p_key_cmp_obj}, key_eq_obj_{p_key_eq_obj}, value_eq_obj_{p_value_eq_obj}, epoch_(1) {
+      : key_cmp_obj_{p_key_cmp_obj}, key_eq_obj_{p_key_eq_obj}, value_eq_obj_{p_value_eq_obj}, epoch_(1),
+      mem_tracker_(std::make_unique<execution::sql::MemoryTracker>()),
+      mem_pool_(std::make_unique<execution::sql::MemoryPool>(common::ManagedPointer<execution::sql::MemoryTracker>(mem_tracker_))),
+      inner_node_garbage_map_(this), leaf_node_garbage_map_(this) {
     root_ = static_cast<BaseNode *>(this->NewLeafNode());
-  }
-
-  ~BPlusTree() {
-    IterateTree(root_.load(), [](BaseNode *n) { delete n; });
   }
 
   // Tunable parameters
@@ -151,12 +152,14 @@ class BPlusTree {
   template <class T>
   class ThreadToAllocatorMap {
    public:
+    ThreadToAllocatorMap(BPlusTree *tree) : tree_(tree) {}
+
     ~ThreadToAllocatorMap() {
       common::SharedLatch::ScopedExclusiveLatch l(&latch_);
       for (auto it : map_) {
         auto *q = it.second;
         for (auto it2 = q->unsafe_begin(); it2 != q->unsafe_end(); it2++) {
-          delete (*it2);
+          tree_->mem_pool_->Deallocate(*it2, sizeof(T));
         }
         delete q;
       }
@@ -183,6 +186,7 @@ class BPlusTree {
       return map_.at(id);
     }
 
+    BPlusTree *tree_;
     common::SharedLatch latch_;
     std::unordered_map<pthread_t, tbb::concurrent_queue<T> *> map_;
   };
@@ -745,18 +749,13 @@ class BPlusTree {
     for (auto id : ids) {
       auto *garbage_q = inner_node_garbage_map_.LookUp(id);
 
-      if (UNLIKELY(!inner_node_new_node_map_.Exists(id))) {
-        inner_node_new_node_map_.Insert(id);
-      }
-      auto *new_q = inner_node_new_node_map_.LookUp(id);
 
       std::vector<InnerNode *> v;
       InnerNode *n;
       while (garbage_q->try_pop(n)) {
         TERRIER_ASSERT(n->deleted_, "all nodes passed to gc must be marked as deleted");
         if (n->deleted_epoch_ <= safe_to_delete_epoch) {
-          n->Reallocate(this);
-          new_q->push(n);
+          mem_pool_->Deallocate(n, sizeof(InnerNode));
         } else {
           v.emplace_back(n);
         }
@@ -772,18 +771,12 @@ class BPlusTree {
     for (auto id : ids) {
       auto *garbage_q = leaf_node_garbage_map_.LookUp(id);
 
-      if (UNLIKELY(!leaf_node_new_node_map_.Exists(id))) {
-        leaf_node_new_node_map_.Insert(id);
-      }
-      auto *new_q = leaf_node_new_node_map_.LookUp(id);
-
       std::vector<LeafNode *> v;
       LeafNode *n = nullptr;
       while (garbage_q->try_pop(n)) {
         TERRIER_ASSERT(n->deleted_, "all nodes passed to gc must be marked as deleted");
         if (n->deleted_epoch_ <= safe_to_delete_epoch) {
-          n->Reallocate(this);
-          new_q->push(n);
+          mem_pool_->Deallocate(n, sizeof(LeafNode));
         } else {
           v.emplace_back(n);
         }
@@ -1175,8 +1168,8 @@ class BPlusTree {
           }
         }
       }
+      return false;
     }
-    return false;
   }
 
   /// Remove Removes key value pair given
@@ -1366,33 +1359,17 @@ class BPlusTree {
   /// NewInnerNode finds a new inner node. Does so with a per-thread allocator
   /// \return a free node
   InnerNode *NewInnerNode() {
-    pthread_t id = pthread_self();
-    if (UNLIKELY(!inner_node_new_node_map_.Exists(id))) {
-      inner_node_new_node_map_.Insert(id);
-      return new InnerNode(this);
-    }
-    auto *q = inner_node_new_node_map_.LookUp(id);
-    InnerNode *new_node;
-    if (!q->try_pop(new_node)) {
-      return new InnerNode(this);
-    }
-    return new_node;
+    auto *node = static_cast<InnerNode *>(mem_pool_->Allocate(sizeof(InnerNode), false));
+    node->Reallocate(this);
+    return node;
   }
 
   /// NewLeafNode finds a new leaf node. Does so with a per-thread allocator
   /// \return a free node
   LeafNode *NewLeafNode() {
-    pthread_t id = pthread_self();
-    if (UNLIKELY(!leaf_node_new_node_map_.Exists(id))) {
-      leaf_node_new_node_map_.Insert(id);
-      return new LeafNode(this);
-    }
-    auto *q = leaf_node_new_node_map_.LookUp(id);
-    LeafNode *new_node = nullptr;
-    if (!q->try_pop(new_node)) {
-      return new LeafNode(this);
-    }
-    return new_node;
+    auto *node = static_cast<LeafNode *>(mem_pool_->Allocate(sizeof(LeafNode), false));
+    node->Reallocate(this);
+    return node;
   }
 
   void IterateTree(BaseNode* node, std::function<void(BaseNode *)> node_func) {
@@ -1444,8 +1421,8 @@ class BPlusTree {
   std::atomic<uint64_t> structure_size_ = 5;
   std::atomic<uint64_t> epoch_ = MAX_NUM_ACTIVE_EPOCHS;
   std::atomic<BaseNode *> root_;
-  ThreadToAllocatorMap<InnerNode *> inner_node_new_node_map_;
-  ThreadToAllocatorMap<LeafNode *> leaf_node_new_node_map_;
+  std::unique_ptr<execution::sql::MemoryTracker> mem_tracker_;
+  std::unique_ptr<execution::sql::MemoryPool> mem_pool_;
   ThreadToAllocatorMap<InnerNode *> inner_node_garbage_map_;
   ThreadToAllocatorMap<LeafNode *> leaf_node_garbage_map_;
   common::SpinLatch root_latch_;
