@@ -89,7 +89,7 @@ class BPlusTree {
   static const uint16_t INNER_NODE_OPTIMAL_FILL = BRANCH_FACTOR / 2;
   static const uint16_t LEAF_SIZE = 32;  // cannot ever be less than 3
   static const uint16_t LEAF_OPTIMAL_FILL = LEAF_SIZE / 2;
-  static const uint64_t MAX_NUM_ACTIVE_EPOCHS = static_cast<uint64_t>(0x1) << 3;
+  static const uint64_t MAX_NUM_ACTIVE_EPOCHS = static_cast<uint64_t>(0x1) << 6;
   static const uint64_t ALLOCATOR_ARRAY_SIZE = 1024;
   static const uint64_t ALLOCATOR_START_SIZE = 10;
 
@@ -143,8 +143,11 @@ class BPlusTree {
     INNER_NODE = false,
   };
 
+  /*
+   * ThreadToAllocatorMap is a concurrent map of thread ids to concurrent queues.
+   */
   template <class T>
-  class NodeMap {
+  class ThreadToAllocatorMap {
    public:
     void Keys(std::vector<pthread_t> *ids) {
       common::SharedLatch::ScopedSharedLatch l(&latch_);
@@ -179,15 +182,6 @@ class BPlusTree {
     Success = 0,
     Failure = 1,
     RetryableFailure = 2,
-  };
-
-  class BPlusTreeLatch {
-   public:
-    void Lock() { latch_.Lock(); }
-    void Unlock() { latch_.Unlock(); }
-
-   private:
-    common::SpinLatch latch_;
   };
 
   /*
@@ -716,6 +710,10 @@ class BPlusTree {
     KeyType keys_[LEAF_SIZE];
   };
 
+  /*
+   * ReclaimOldNodes finds the most recent safe epoch to mark as completed and then moves all nodes from that epoch to
+   * be able to be allocated.
+   */
   void ReclaimOldNodes() {
     uint64_t old_epoch = epoch_;
     uint64_t iter = 1;
@@ -785,6 +783,9 @@ class BPlusTree {
     }
   }
 
+  /*
+   * RunGarbageCollection reclaims all deleted nodes and recycles them
+   */
   void RunGarbageCollection() { ReclaimOldNodes(); }
 
   /// StartFunction records that a function was started. Returns the epoch in which the function was started
@@ -1084,7 +1085,7 @@ class BPlusTree {
       holds_tree_latch = false;
     }
 
-    TERRIER_ASSERT(locked_nodes.size() == 0, "we should have unlocked all locked nodes");
+    TERRIER_ASSERT(locked_nodes.empty(), "we should have unlocked all locked nodes");
     TERRIER_ASSERT(!holds_tree_latch, "should not hold the rootlatch on return");
     return true;
   }
@@ -1350,6 +1351,8 @@ class BPlusTree {
     root_latch_.Unlock();
   }
 
+  /// NewInnerNode finds a new inner node. Does so with a per-thread allocator
+  /// \return a free node
   InnerNode *NewInnerNode() {
     pthread_t id = pthread_self();
     if (UNLIKELY(!inner_node_new_node_map_.Exists(id))) {
@@ -1364,6 +1367,8 @@ class BPlusTree {
     return new_node;
   }
 
+  /// NewLeafNode finds a new leaf node. Does so with a per-thread allocator
+  /// \return a free node
   LeafNode *NewLeafNode() {
     pthread_t id = pthread_self();
     if (UNLIKELY(!leaf_node_new_node_map_.Exists(id))) {
@@ -1378,6 +1383,18 @@ class BPlusTree {
     return new_node;
   }
 
+  void CheckTree() {
+    LeafNode* min_leaf = FindMinLeafReadOnly();
+    LeafNode* max_leaf = FindMaxLeafReadOnly();
+    LeafNode* leaf;
+    for (leaf = min_leaf; leaf != nullptr; leaf = leaf->right_) {}
+    TERRIER_ASSERT(leaf == max_leaf, "max leaf should be reachable from min leaf");
+
+    for (leaf = max_leaf; leaf != nullptr; leaf = leaf->left) {}
+    TERRIER_ASSERT(leaf == min_leaf, "min leaf should be reachable from max leaf");
+
+  }
+
   // Key comparator, and key and value equality checker
   KeyComparator key_cmp_obj_;
   KeyEqualityChecker key_eq_obj_;
@@ -1386,10 +1403,10 @@ class BPlusTree {
   std::atomic<uint64_t> structure_size_ = 5;
   std::atomic<uint64_t> epoch_ = MAX_NUM_ACTIVE_EPOCHS;
   std::atomic<BaseNode *> root_;
-  NodeMap<InnerNode *> inner_node_new_node_map_;
-  NodeMap<LeafNode *> leaf_node_new_node_map_;
-  NodeMap<InnerNode *> inner_node_garbage_map_;
-  NodeMap<LeafNode *> leaf_node_garbage_map_;
+  ThreadToAllocatorMap<InnerNode *> inner_node_new_node_map_;
+  ThreadToAllocatorMap<LeafNode *> leaf_node_new_node_map_;
+  ThreadToAllocatorMap<InnerNode *> inner_node_garbage_map_;
+  ThreadToAllocatorMap<LeafNode *> leaf_node_garbage_map_;
   common::SpinLatch root_latch_;
 };
 
