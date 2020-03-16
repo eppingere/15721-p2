@@ -82,7 +82,9 @@ class BPlusTree {
     root_ = static_cast<BaseNode *>(this->NewLeafNode());
   }
 
-  ~BPlusTree() = default;
+  ~BPlusTree() {
+    IterateTree(root_.load(), [](BaseNode *n) { delete n; });
+  }
 
   // Tunable parameters
   static const uint16_t BRANCH_FACTOR = 20;
@@ -149,6 +151,16 @@ class BPlusTree {
   template <class T>
   class ThreadToAllocatorMap {
    public:
+    ~ThreadToAllocatorMap() {
+      common::SharedLatch::ScopedExclusiveLatch l(&latch_);
+      for (auto it : map_) {
+        auto *q = it.second;
+        for (auto it2 = q->unsafe_begin(); it2 != q->unsafe_end(); it2++) {
+          delete (*it2);
+        }
+        delete q;
+      }
+    }
     void Keys(std::vector<pthread_t> *ids) {
       common::SharedLatch::ScopedSharedLatch l(&latch_);
       for (auto it : map_) {
@@ -1383,6 +1395,16 @@ class BPlusTree {
     return new_node;
   }
 
+  void IterateTree(BaseNode* node, std::function<void(BaseNode *)> node_func) {
+    if (node->GetType() != NodeType::LEAF) {
+      auto *inner_n = static_cast<InnerNode *>(node);
+      for (uint16_t i = 0; i <= inner_n->size_; i++) {
+        IterateTree(inner_n->children_[i], node_func);
+      }
+    }
+    node_func(node);
+  }
+
   void CheckTree() {
     LeafNode* min_leaf = FindMinLeafReadOnly();
     LeafNode* max_leaf = FindMaxLeafReadOnly();
@@ -1392,6 +1414,25 @@ class BPlusTree {
 
     for (leaf = max_leaf; leaf != nullptr; leaf = leaf->left) {}
     TERRIER_ASSERT(leaf == min_leaf, "min leaf should be reachable from max leaf");
+
+    IterateTree(root_.load(), [this](BaseNode *node) {
+      TERRIER_ASSERT(!node->deleted_, "in single thread no deleted nodes should be visible");
+      if (node->GetType() == NodeType::LEAF) {
+        return;
+      }
+
+      auto *inner_n = static_cast<InnerNode *>(node);
+
+      TERRIER_ASSERT(inner_n->children_[0] != nullptr, "all active children should not be null");
+      if (inner_n->size_ >= 1) {
+        TERRIER_ASSERT(inner_n->children_[1] != nullptr, "all active children should not be null");
+      }
+      for (uint16_t i = 1; i < inner_n->size_; i++) {
+        TERRIER_ASSERT(inner_n->children_[i + 1] != nullptr, "all active children should not be null");
+        TERRIER_ASSERT(this->KeyCmpLessEqual(inner_n->keys_[i - 1], inner_n->keys_[i]),
+                       "inner node keys must be non-decreasing");
+      }
+    });
 
   }
 
