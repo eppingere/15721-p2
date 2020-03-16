@@ -141,9 +141,18 @@ class BPlusTreeIndex final : public Index {
     // Perform lookup in BPlusTree
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
 
-    std::function<bool(TupleSlot)> predicate = [&](TupleSlot tuple) { return IsVisible(txn, tuple); };
+//    std::vector<TupleSlot> results;
 
-    bplustree_->ScanKey(index_key, value_list, predicate);
+    // Perform lookup in BwTree
+    bplustree_->ScanKey(index_key, value_list, [&txn] (TupleSlot s) { return IsVisible(txn, s);});
+
+//    // Avoid resizing our value_list, even if it means over-provisioning
+//    value_list->reserve(results.size());
+//
+//    // Perform visibility check on result
+//    for (const auto &result : results) {
+//      if (IsVisible(txn, result)) value_list->emplace_back(result);
+//    }
 
     TERRIER_ASSERT(!(metadata_.GetSchema().Unique()) || (metadata_.GetSchema().Unique() && value_list->size() <= 1),
                    "Invalid number of results for unique index.");
@@ -175,7 +184,7 @@ class BPlusTreeIndex final : public Index {
 
     // FIXME(15-721 project2): perform a lookup of the underlying data structure of the key
     bool done = false;
-    for (auto *leaf = low_key_exists ? bplustree_->FindMinLeafReadOnly(index_high_key)
+    for (auto *leaf = low_key_exists ? bplustree_->FindMinLeafReadOnly(index_low_key)
                                      : bplustree_->FindMinLeafReadOnly();
          leaf != nullptr && (limit == 0 || value_list->size() < limit) && !done; leaf = leaf->right_) {
 
