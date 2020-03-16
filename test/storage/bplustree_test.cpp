@@ -51,9 +51,10 @@ TEST_F(BPlusTreeTests, CompressTest1) {
     compressed_leaves++;
 
   EXPECT_EQ(compress_depth, start_depth);
-  uint64_t estimated_leaves = num_inserts_ / (BPlusTree<uint64_t, uint64_t>::LEAF_SIZE / 2) / (BPlusTree<uint64_t, uint64_t>::BRANCH_FACTOR / 2);
+  uint64_t estimated_leaves = num_inserts_ / (BPlusTree<uint64_t, uint64_t>::LEAF_SIZE / 2) /
+                              (BPlusTree<uint64_t, uint64_t>::BRANCH_FACTOR / 2);
   EXPECT_TRUE(estimated_leaves == 0 || compressed_leaves >= (estimated_leaves - 1));
-  EXPECT_TRUE(estimated_leaves == std::numeric_limits<uint64_t >::max() || compressed_leaves <= (estimated_leaves + 1));
+  EXPECT_TRUE(estimated_leaves == std::numeric_limits<uint64_t>::max() || compressed_leaves <= (estimated_leaves + 1));
 }
 
 TEST_F(BPlusTreeTests, CompressTest2) {
@@ -193,7 +194,7 @@ TEST_F(BPlusTreeTests, RepeatInserts) {
 
   for (uint64_t i = 0; i < num_inserts_; i++) {
     bool rand = true;
-    EXPECT_FALSE(test_tree_->Insert(i, i, &rand, [] (uint64_t i) { return true; }));
+    EXPECT_FALSE(test_tree_->Insert(i, i, &rand, [](uint64_t i) { return true; }));
   }
   test_tree_->CheckTree();
 
@@ -220,7 +221,7 @@ TEST_F(BPlusTreeTests, RepeatInserts) {
   test_tree_->CheckTree();
 }
 
-TEST_F(BPlusTreeTests,  SimpleInsert) {
+TEST_F(BPlusTreeTests, SimpleInsert) {
   test_tree_ = new BPlusTree<uint64_t, uint64_t>();
   test_tree_->CheckTree();
   for (uint64_t i = 0; i < BPlusTree<uint64_t, uint64_t>::LEAF_SIZE; i++) {
@@ -239,7 +240,7 @@ TEST_F(BPlusTreeTests,  SimpleInsert) {
   test_tree_->CheckTree();
 }
 
-TEST_F(BPlusTreeTests,  SplitInsert) {
+TEST_F(BPlusTreeTests, SplitInsert) {
   test_tree_ = new BPlusTree<uint64_t, uint64_t>();
   test_tree_->CheckTree();
   for (uint64_t i = 0; i < BPlusTree<uint64_t, uint64_t>::LEAF_SIZE + 1; i++) {
@@ -258,7 +259,7 @@ TEST_F(BPlusTreeTests,  SplitInsert) {
   test_tree_->CheckTree();
 }
 
-TEST_F(BPlusTreeTests,  SimpleDelete) {
+TEST_F(BPlusTreeTests, SimpleDelete) {
   test_tree_ = new BPlusTree<uint64_t, uint64_t>();
   test_tree_->CheckTree();
   for (uint64_t i = 0; i < BPlusTree<uint64_t, uint64_t>::LEAF_SIZE; i++) {
@@ -294,7 +295,7 @@ TEST_F(BPlusTreeTests,  SimpleDelete) {
   test_tree_->CheckTree();
 }
 
-TEST_F(BPlusTreeTests,  FullDelete) {
+TEST_F(BPlusTreeTests, FullDelete) {
   test_tree_ = new BPlusTree<uint64_t, uint64_t>();
   test_tree_->CheckTree();
   for (uint64_t i = 0; i < num_inserts_; i++) {
